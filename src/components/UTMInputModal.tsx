@@ -110,7 +110,11 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData, common
 
   const currentEastingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'easting/m' || h.toLowerCase() === 'easting');
   const currentNorthingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'northing/m' || h.toLowerCase() === 'northing');
+  const islandKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'island');
+  const urlKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'url');
 
+  const islandValue = islandKey ? rowData.row[islandKey] : 'N/A';
+  const urlValue = urlKey ? rowData.row[urlKey] : 'N/A';
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -119,6 +123,8 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData, common
           <DialogTitle>Provide UTM Information</DialogTitle>
           <DialogDescription>
             For row: <strong>{rowData.row.__rowIdentifier__}</strong> (File: {rowData.row.__fileName__}, Original Index: {rowData.row.__originalRowIndex__ + 1})
+            <br />
+            Island: {islandValue}, URL: {String(urlValue).length > 50 ? String(urlValue).substring(0, 50) + '...' : urlValue}
             <br />
             {!requiresENInput && (
                 <>Easting: {currentEastingKey ? rowData.row[currentEastingKey] : 'N/A'}, Northing: {currentNorthingKey ? rowData.row[currentNorthingKey] : 'N/A'}<br/></>
