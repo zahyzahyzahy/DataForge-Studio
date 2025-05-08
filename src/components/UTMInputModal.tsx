@@ -115,6 +115,8 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData, common
 
   const islandValue = islandKey ? rowData.row[islandKey] : 'N/A';
   const urlValue = urlKey ? rowData.row[urlKey] : 'N/A';
+  
+  const displayUrl = String(urlValue).length > 50 ? String(urlValue).substring(0, 50) + '...' : urlValue;
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -124,7 +126,18 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData, common
           <DialogDescription>
             For row: <strong>{rowData.row.__rowIdentifier__}</strong> (File: {rowData.row.__fileName__}, Original Index: {rowData.row.__originalRowIndex__ + 1})
             <br />
-            Island: {islandValue}, URL: {String(urlValue).length > 50 ? String(urlValue).substring(0, 50) + '...' : urlValue}
+            Island: {islandValue}, URL: {urlValue !== 'N/A' && typeof urlValue === 'string' && urlValue.trim() !== '' ? (
+              <a
+                href={urlValue}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                {displayUrl}
+              </a>
+            ) : (
+              'N/A'
+            )}
             <br />
             {!requiresENInput && (
                 <>Easting: {currentEastingKey ? rowData.row[currentEastingKey] : 'N/A'}, Northing: {currentNorthingKey ? rowData.row[currentNorthingKey] : 'N/A'}<br/></>
