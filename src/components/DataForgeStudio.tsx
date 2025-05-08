@@ -1,3 +1,4 @@
+// This is a server action.
 'use client';
 
 import type { ChangeEvent } from 'react';
@@ -11,7 +12,7 @@ import { applyIntelligentTransformations } from '@/lib/data-transformer';
 import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -272,7 +273,7 @@ export default function DataForgeStudio() {
       toast({ title: "Action Required", description: "Some rows require UTM zone input. Check the 'Issues & UTM' tab.", variant: "default", duration: 5000});
     }
 
-  }, [toast]);
+  }, [toast, applySmartTransforms]);
 
 
   const handleUtmModalOpen = (row: ProcessedRow, indexInProcessedJson: number) => {
@@ -919,6 +920,7 @@ export default function DataForgeStudio() {
                       <Table>
                         <TableHeader className="sticky top-0 bg-background z-10">
                           <TableRow>
+                            <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><List className="h-4 w-4 inline-block mr-1" />#</TableHead>
                             {outputTableHeaders.map(header => (
                               <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">{header}</TableHead>
                             ))}
@@ -927,6 +929,7 @@ export default function DataForgeStudio() {
                         <TableBody>
                           {finalJsonOutputForPreview.map((row, rowIndex) => (
                             <TableRow key={`output-row-${rowIndex}`}>
+                              <TableCell className="text-xs px-2 py-1 font-medium text-muted-foreground">{rowIndex + 1}</TableCell>
                               {outputTableHeaders.map(header => (
                                 <TableCell key={`output-cell-${rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate" title={String(row[header])}>
                                   {String(row[header])}
@@ -1024,4 +1027,3 @@ function getRowIdentifier(row: JsonObject, rowIndex: number, fileName: string): 
   }
   return `${fileName} Original Row ${rowIndex + 1}`;
 }
-
