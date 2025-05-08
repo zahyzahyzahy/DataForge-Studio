@@ -1,24 +1,25 @@
 'use client';
 
 import type { ChangeEvent } from 'react';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { parseCsvToJson } from '@/lib/csv-parser';
-import { applyIntelligentTransformations, getRelevantTransformationColumns, type DataRow } from '@/lib/data-transformer';
-import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonArray, type JsonObject } from '@/lib/json-utils';
+import { applyIntelligentTransformations, getRelevantTransformationColumns } from '@/lib/data-transformer';
+import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Combine, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ListX, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
-import { Badge } from './ui/badge';
 import { Separator } from './ui/separator';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Switch } from './ui/switch';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Table,
   TableBody,
@@ -27,162 +28,248 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import UTMInputModal from './UTMInputModal';
+import type { FileWithData as OriginalFileWithData, ProcessedJsonArray, ProcessedRow, TransformationLogEntry, UTMZone, RowForUTMInput, ApplyTransformationsResult } from '@/types/data';
 
-interface FileWithData {
-  file: File;
-  data: JsonArray | JsonObject | null;
-  id: string;
-}
 
 interface KeyConfig {
   name: string;
   included: boolean;
+  order: number;
 }
 
+type SortConfig<T> = {
+  key: keyof T;
+  direction: 'ascending' | 'descending';
+} | null;
+
+
 export default function DataForgeStudio() {
-  const [uploadedFiles, setUploadedFiles] = useState<FileWithData[]>([]);
-  const [processedJson, setProcessedJson] = useState<JsonArray | null>(null);
-  const [keyOrder, setKeyOrder] = useState<KeyConfig[]>([]);
+  const [uploadedFilesData, setUploadedFilesData] = useState<OriginalFileWithData[]>([]);
+  const [processedJson, setProcessedJson] = useState<ProcessedJsonArray | null>(null);
+  const [keyOrderConfig, setKeyOrderConfig] = useState<KeyConfig[]>([]);
+  
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [currentError, setCurrentError] = useState<string | null>(null);
+  
   const [aiSuggestions, setAiSuggestions] = useState<string[] | null>(null);
   const [columnDescriptions, setColumnDescriptions] = useState<GenerateColumnDescriptionsOutput | null>(null);
   const [showColumnDescriptions, setShowColumnDescriptions] = useState(false);
+  
   const [applySmartTransforms, setApplySmartTransforms] = useState(true);
-  const [activeTab, setActiveTab] = useState<'preview' | 'structure' | 'ai'>('preview');
+  const [activeMainTab, setActiveMainTab] = useState<string>('upload');
 
+  const [transformationLog, setTransformationLog] = useState<TransformationLogEntry[]>([]);
+  const [rowsDeselected, setRowsDeselected] = useState<Set<string>>(new Set()); // Set of ProcessedRow.__id__
+
+  const [isUtmModalOpen, setIsUtmModalOpen] = useState(false);
+  const [currentRowForUtmInput, setCurrentRowForUtmInput] = useState<RowForUTMInput | null>(null);
+  const [utmZoneOverrides, setUtmZoneOverrides] = useState<Map<string, UTMZone | string>>(new Map());
 
   const { toast } = useToast();
 
-  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files) return;
+  const [issueSortConfig, setIssueSortConfig] = useState<SortConfig<TransformationLogEntry>>({ key: 'originalRowIndex', direction: 'ascending'});
+  const [validationSortConfig, setValidationSortConfig] = useState<SortConfig<TransformationLogEntry>>({ key: 'originalRowIndex', direction: 'ascending'});
 
-    setIsLoading(true);
-    setError(null);
-    setProgress(0);
+
+  const resetStateForNewUpload = () => {
+    setUploadedFilesData([]);
+    setProcessedJson(null);
+    setKeyOrderConfig([]);
+    setCurrentError(null);
     setAiSuggestions(null);
     setColumnDescriptions(null);
-    setProcessedJson(null);
-    setKeyOrder([]);
+    setShowColumnDescriptions(false);
+    setTransformationLog([]);
+    setRowsDeselected(new Set());
+    setUtmZoneOverrides(new Map());
+    setActiveMainTab('upload');
+    setProgress(0);
+  };
 
-    const newFiles: FileWithData[] = [];
+  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    resetStateForNewUpload();
+    setIsLoading(true);
+
+    const newFilesToProcess: OriginalFileWithData[] = [];
     let totalProgress = 0;
-    const increment = 100 / files.length / 2; // Each file has parsing and potential AI steps
+    const filesArray = Array.from(files);
+    const incrementPerFile = 100 / filesArray.length;
 
-    for (const file of Array.from(files)) {
+    for (const file of filesArray) {
       const fileId = `${file.name}-${Date.now()}`;
       try {
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          const text = e.target?.result as string;
-          let jsonData: JsonArray | null = null;
+        const text = await file.text();
+        let jsonData: JsonObject[] | null = null;
 
-          if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
-            const parsed = await parseCsvToJson(text);
-            if (parsed.errors.length > 0) {
-              console.warn('CSV parsing errors:', parsed.errors);
-              toast({ title: 'CSV Warning', description: `Some rows in ${file.name} might have issues.`, variant: 'default' });
-            }
-            jsonData = parsed.data;
-            
-            if (applySmartTransforms) {
-                const headers = jsonData.length > 0 ? Object.keys(jsonData[0]) : [];
-                const relevantCols = getRelevantTransformationColumns();
-                const hasRelevantCols = headers.some(h => relevantCols.includes(h));
-
-                if (hasRelevantCols) {
-                    jsonData = applyIntelligentTransformations(jsonData as DataRow[]);
-                    toast({ title: 'Smart Transforms Applied', description: `Intelligent data transformations applied to ${file.name}.`, variant: 'default' });
-                }
-            }
-
-
-            // AI suggestions for CSV
-            if (jsonData && jsonData.length > 0) {
-              const headers = Object.keys(jsonData[0]);
-              try {
-                const suggestionsOutput = await suggestTransformations({ columnHeaders: headers });
-                setAiSuggestions(prev => [...(prev || []), ...suggestionsOutput.transformations]);
-                totalProgress += increment / 2; // Half of increment for AI suggestion
-                setProgress(totalProgress);
-              } catch (aiError) {
-                console.error("Error fetching AI suggestions:", aiError);
-              }
-            }
-
-
-          } else if (file.type === 'application/json' || file.name.endsWith('.json')) {
-            jsonData = JSON.parse(text) as JsonArray; // Assuming array of objects for consistency
-            if (!Array.isArray(jsonData)) jsonData = [jsonData as unknown as JsonObject]; // Ensure it's an array
-          } else {
-            throw new Error(`Unsupported file type: ${file.type || file.name.split('.').pop()}`);
+        if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
+          const parsed = await parseCsvToJson(text);
+          if (parsed.errors.length > 0) {
+            console.warn('CSV parsing errors:', parsed.errors);
+            toast({ title: 'CSV Warning', description: `Some rows in ${file.name} might have issues.`, variant: 'default' });
           }
-          
-          newFiles.push({ file, data: jsonData, id: fileId });
-          totalProgress += increment;
-          setProgress(totalProgress);
-
-          if (newFiles.length === files.length) {
-            setUploadedFiles(prev => [...prev, ...newFiles]);
-            processFiles(newFiles); // Process immediately or allow separate merge step
-          }
-        };
-        reader.readAsText(file);
-      } catch (err: any) {
-        setError(`Error processing ${file.name}: ${err.message}`);
-        toast({ title: 'File Error', description: `Failed to process ${file.name}.`, variant: 'destructive' });
-        totalProgress += increment * 2; // Count full progress for failed file
-        setProgress(totalProgress);
-        if (newFiles.length + (Array.from(files).length - newFiles.length) === files.length && newFiles.length > 0) {
-           setUploadedFiles(prev => [...prev, ...newFiles]);
-           processFiles(newFiles);
-        } else if (newFiles.length === 0 && files.length === 1) {
-          setIsLoading(false);
+          jsonData = parsed.data;
+        } else if (file.type === 'application/json' || file.name.endsWith('.json')) {
+          const parsedJson = JSON.parse(text);
+          jsonData = Array.isArray(parsedJson) ? parsedJson : [parsedJson];
+        } else {
+          throw new Error(`Unsupported file type: ${file.type || file.name.split('.').pop()}`);
         }
+        
+        if (jsonData) {
+          newFilesToProcess.push({ file, data: jsonData, id: fileId, fileName: file.name });
+        }
+        
+      } catch (err: any) {
+        setCurrentError(`Error processing ${file.name}: ${err.message}`);
+        toast({ title: 'File Error', description: `Failed to process ${file.name}.`, variant: 'destructive' });
+      } finally {
+        totalProgress += incrementPerFile;
+        setProgress(Math.min(100, totalProgress));
       }
     }
+    
+    setUploadedFilesData(newFilesToProcess);
+
+    if (newFilesToProcess.length > 0) {
+      await processAndTransformFiles(newFilesToProcess, applySmartTransforms, utmZoneOverrides);
+      const firstFileWithData = newFilesToProcess.find(f => f.data && (f.data as JsonObject[]).length > 0);
+      if (firstFileWithData && (firstFileWithData.file.type === 'text/csv' || firstFileWithData.file.name.endsWith('.csv'))) {
+          const headers = Object.keys((firstFileWithData.data as JsonObject[])[0]);
+          try {
+            const suggestionsOutput = await suggestTransformations({ columnHeaders: headers });
+            setAiSuggestions(suggestionsOutput.transformations);
+          } catch (aiError) {
+            console.error("Error fetching AI suggestions:", aiError);
+            // toast({ title: 'AI Suggestion Error', description: 'Could not fetch AI suggestions.', variant: 'default' });
+          }
+      }
+      
+      setActiveMainTab('issues'); // Move to issues tab after upload
+    } else {
+      toast({title: "No files processed", description: "No valid files were loaded.", variant: "default"});
+    }
+    setIsLoading(false);
   };
   
-  const processFiles = useCallback((filesToProcess: FileWithData[]) => {
-    if (filesToProcess.length === 0) {
-        setIsLoading(false);
-        setProgress(100);
-        return;
-    }
 
-    const allData = filesToProcess.map(f => f.data).filter(d => d !== null) as (JsonArray | JsonObject)[];
-    if (allData.length === 0) {
-        setError("No valid data to process.");
-        setIsLoading(false);
-        setProgress(100);
-        return;
+  const processAndTransformFiles = useCallback(async (
+    filesToProcess: OriginalFileWithData[],
+    applyTransforms: boolean,
+    currentUtmOverrides: Map<string, UTMZone | string>
+  ) => {
+    if (filesToProcess.length === 0) {
+      setProcessedJson(null);
+      setTransformationLog([]);
+      setIsLoading(false);
+      return;
+    }
+    setIsLoading(true);
+    setProgress(50); // Initial progress for starting transformation
+
+    const mappedInput = filesToProcess.map(f => ({
+      fileId: f.id,
+      fileName: f.fileName,
+      data: f.data as JsonObject[] // Assuming data is JsonArray by this point
+    }));
+
+    let transformationResult: ApplyTransformationsResult;
+    if (applyTransforms) {
+      transformationResult = applyIntelligentTransformations(mappedInput, currentUtmOverrides);
+    } else {
+      // If not applying smart transforms, just map to ProcessedRow structure without transformation logic
+      const basicProcessedData: ProcessedJsonArray = [];
+      const basicLog: TransformationLogEntry[] = [];
+      mappedInput.forEach(file => {
+        file.data.forEach((originalRow, idx) => {
+          const rowId = getRowIdentifier(originalRow, idx, file.fileName);
+          const processedRow: ProcessedRow = {
+            ...originalRow,
+            __id__: `${file.fileId}-${idx}`,
+            __originalRowIndex__: idx,
+            __fileId__: file.fileId,
+            __fileName__: file.fileName,
+            __rowIdentifier__: rowId,
+          };
+          basicProcessedData.push(processedRow);
+          Object.keys(originalRow).forEach(key => {
+            basicLog.push({
+              fileId: file.fileId,
+              originalRowIndex: idx,
+              rowIdentifier: rowId,
+              field: key,
+              originalValue: originalRow[key],
+              transformedValue: originalRow[key],
+              status: 'Unchanged',
+              details: 'Smart transformations disabled.',
+              isError: false,
+            });
+          });
+        });
+      });
+      transformationResult = { transformedData: basicProcessedData, transformationLog: basicLog };
     }
     
-    const merged = mergeJsonArrays(allData);
-    setProcessedJson(merged);
-
-    if (merged && merged.length > 0) {
-      const sampleKeys = Object.keys(merged[0]);
-      setKeyOrder(sampleKeys.map(name => ({ name, included: true })));
+    setProcessedJson(transformationResult.transformedData);
+    setTransformationLog(transformationResult.transformationLog);
+    
+    if (transformationResult.transformedData && transformationResult.transformedData.length > 0) {
+      const sampleKeys = Object.keys(transformationResult.transformedData[0]).filter(k => !k.startsWith('__'));
+      setKeyOrderConfig(sampleKeys.map((name, index) => ({ name, included: true, order: index })));
     } else {
-      setKeyOrder([]);
+      setKeyOrderConfig([]);
     }
-    toast({ title: 'Files Processed', description: `${filesToProcess.length} file(s) loaded and merged.`, variant: 'default' });
-    setIsLoading(false);
+    
+    toast({ title: 'Files Processed', description: `${filesToProcess.length} file(s) loaded. Transformations applied: ${applyTransforms}.`, variant: 'default' });
     setProgress(100);
-  }, []);
+    setIsLoading(false);
+
+    // Check if any rows still need UTM input after processing
+    const needsInput = transformationResult.transformedData.some(row => row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__));
+    if (needsInput) {
+      setActiveMainTab('issues'); // Stay or go to issues tab
+      toast({ title: "Action Required", description: "Some rows require UTM zone input for complete transformation. Please check the 'Issues & UTM' tab.", variant: "default", duration: 5000});
+    }
+
+  }, [toast]);
 
 
-  useEffect(() => {
-    // This effect can be used if files are uploaded incrementally and then merged by a button
-    // For now, processFiles is called directly after all files are read.
-  }, [uploadedFiles]);
+  const handleUtmModalOpen = (row: ProcessedRow, indexInProcessedJson: number) => {
+     setCurrentRowForUtmInput({row, rowIndexInProcessedJson: indexInProcessedJson});
+     setIsUtmModalOpen(true);
+  };
 
-  const handleKeyOrderChange = (index: number, direction: 'up' | 'down') => {
-    setKeyOrder(prev => {
-      const newOrder = [...prev];
+  const handleUtmSave = async (utmInput: UTMZone | string) => {
+    if (!currentRowForUtmInput) return;
+    
+    const updatedOverrides = new Map(utmZoneOverrides);
+    updatedOverrides.set(currentRowForUtmInput.row.__id__, utmInput);
+    setUtmZoneOverrides(updatedOverrides);
+    setIsUtmModalOpen(false);
+    
+    // Re-process files with the new override
+    if (uploadedFilesData.length > 0) {
+      toast({title: "Re-processing", description: "Applying new UTM information...", variant: "default"});
+      await processAndTransformFiles(uploadedFilesData, applySmartTransforms, updatedOverrides);
+    }
+  };
+
+  const handleKeyOrderChange = (keyName: string, direction: 'up' | 'down') => {
+    setKeyOrderConfig(prev => {
+      const newOrder = [...prev.sort((a, b) => a.order - b.order)];
+      const index = newOrder.findIndex(k => k.name === keyName);
+      if (index === -1) return prev;
+
       const item = newOrder[index];
       if (direction === 'up' && index > 0) {
         newOrder.splice(index, 1);
@@ -191,44 +278,66 @@ export default function DataForgeStudio() {
         newOrder.splice(index, 1);
         newOrder.splice(index + 1, 0, item);
       }
-      return newOrder;
+      return newOrder.map((k, idx) => ({ ...k, order: idx }));
     });
   };
 
   const handleKeyInclusionChange = (keyName: string) => {
-    setKeyOrder(prev => prev.map(k => k.name === keyName ? { ...k, included: !k.included } : k));
+    setKeyOrderConfig(prev => prev.map(k => k.name === keyName ? { ...k, included: !k.included } : k));
   };
 
+  const handleRowDeselection = (rowId: string) => {
+    setRowsDeselected(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(rowId)) {
+        newSet.delete(rowId);
+      } else {
+        newSet.add(rowId);
+      }
+      return newSet;
+    });
+  };
+  
   const getFinalJson = useCallback(() => {
     if (!processedJson) return null;
-    const orderedKeys = keyOrder.map(k => k.name);
-    const includedKeysMap = keyOrder.reduce((acc, k) => {
+    
+    const filteredData = processedJson.filter(row => !rowsDeselected.has(row.__id__));
+
+    const orderedKeys = keyOrderConfig
+      .filter(k => k.included)
+      .sort((a,b) => a.order - b.order)
+      .map(k => k.name);
+      
+    const includedKeysMap = keyOrderConfig.reduce((acc, k) => {
       acc[k.name] = k.included;
       return acc;
     }, {} as Record<string, boolean>);
-    return restructureJsonArray(processedJson, orderedKeys, includedKeysMap);
-  }, [processedJson, keyOrder]);
+
+    return restructureJsonArray(filteredData, orderedKeys, includedKeysMap, true); // true to strip __ internal keys
+  }, [processedJson, keyOrderConfig, rowsDeselected]);
 
 
   const handleDownload = () => {
     const finalJson = getFinalJson();
-    if (finalJson) {
+    if (finalJson && finalJson.length > 0) {
       downloadJson(finalJson, 'dataforge_output.json');
       toast({ title: 'Download Started', description: 'Your JSON file is being downloaded.', variant: 'default', className: 'bg-accent text-accent-foreground' });
     } else {
-      toast({ title: 'No Data', description: 'No data to download.', variant: 'destructive' });
+      toast({ title: 'No Data', description: 'No data to download (possibly all rows with issues were deselected or no files processed).', variant: 'destructive' });
     }
   };
 
   const fetchColumnDescriptions = async () => {
     if (!processedJson || processedJson.length === 0) {
-      toast({ title: 'No Data', description: 'Upload a CSV to generate descriptions.', variant: 'destructive' });
+      toast({ title: 'No Data', description: 'Upload data to generate descriptions.', variant: 'destructive' });
       return;
     }
-    // Create a sample CSV string from the first few rows of processedJson
-    // This assumes processedJson came from a CSV or has a similar structure.
-    // If it's merged from multiple CSVs, headers should ideally be consistent.
-    const headers = Object.keys(processedJson[0]);
+    
+    const headers = keyOrderConfig.filter(k => k.included).map(k => k.name);
+    if (headers.length === 0) {
+         toast({ title: 'No Columns', description: 'No columns selected for description generation.', variant: 'destructive' });
+         return;
+    }
     const sampleCsvData = [
       headers.join(','),
       ...processedJson.slice(0, 5).map(row => headers.map(header => JSON.stringify(row[header])).join(','))
@@ -248,205 +357,453 @@ export default function DataForgeStudio() {
     }
   };
   
-  const finalJsonOutput = getFinalJson();
-  const previewData = finalJsonOutput ? JSON.stringify(finalJsonOutput.slice(0, 5), null, 2) : "No data to display.";
+  const finalJsonOutputForPreview = getFinalJson();
+  const previewData = finalJsonOutputForPreview ? JSON.stringify(finalJsonOutputForPreview.slice(0, 10), null, 2) : "No data to display or all rows deselected.";
+
+  const errorLogEntries = useMemo(() => transformationLog.filter(log => log.isError || log.requiresUtmInput), [transformationLog]);
+  
+  const rowsNeedingUtmInput = useMemo(() => {
+    if (!processedJson) return [];
+    return processedJson.reduce((acc, row, index) => {
+      if (row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__)) {
+        acc.push({ row, rowIndexInProcessedJson: index });
+      }
+      return acc;
+    }, [] as RowForUTMInput[]);
+  }, [processedJson, utmZoneOverrides]);
+
+
+  const requestSort = <T, >(key: keyof T, currentSortConfig: SortConfig<T>, setSortConfig: React.Dispatch<React.SetStateAction<SortConfig<T>>>) => {
+    let direction: 'ascending' | 'descending' = 'ascending';
+    if (currentSortConfig && currentSortConfig.key === key && currentSortConfig.direction === 'ascending') {
+      direction = 'descending';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const sortedErrorLog = useMemo(() => {
+    if (!issueSortConfig) return errorLogEntries;
+    return [...errorLogEntries].sort((a, b) => {
+      if (a[issueSortConfig.key] < b[issueSortConfig.key]) {
+        return issueSortConfig.direction === 'ascending' ? -1 : 1;
+      }
+      if (a[issueSortConfig.key] > b[issueSortConfig.key]) {
+        return issueSortConfig.direction === 'ascending' ? 1 : -1;
+      }
+      return 0;
+    });
+  }, [errorLogEntries, issueSortConfig]);
+
+  const sortedValidationLog = useMemo(() => {
+    if (!validationSortConfig) return transformationLog;
+    return [...transformationLog].sort((a, b) => {
+      if (a[validationSortConfig.key] < b[validationSortConfig.key]) {
+        return validationSortConfig.direction === 'ascending' ? -1 : 1;
+      }
+      if (a[validationSortConfig.key] > b[validationSortConfig.key]) {
+        return validationSortConfig.direction === 'ascending' ? 1 : -1;
+      }
+      return 0;
+    });
+  }, [transformationLog, validationSortConfig]);
+
+  const getSortIndicator = <T, >(key: keyof T, currentSortConfig: SortConfig<T>) => {
+    if (!currentSortConfig || currentSortConfig.key !== key) {
+      return <ArrowUpDown className="ml-2 h-3 w-3 opacity-30" />;
+    }
+    return currentSortConfig.direction === 'ascending' ? '↑' : '↓';
+  };
 
 
   return (
-    <div className="space-y-8">
-      <header className="text-center py-8">
-        <h1 className="text-5xl font-bold text-primary flex items-center justify-center">
-          <Sparkles className="w-12 h-12 mr-3 text-accent" /> DataForge Studio
+    <div className="space-y-6 pb-16">
+      <header className="text-center py-6">
+        <h1 className="text-4xl font-bold text-primary flex items-center justify-center">
+          <Sparkles className="w-10 h-10 mr-3 text-accent" /> DataForge Studio
         </h1>
-        <p className="text-muted-foreground text-lg mt-2">
-          Convert, Merge, Edit, and Transform your data with ease.
+        <p className="text-muted-foreground text-md mt-2 max-w-2xl mx-auto">
+          Your comprehensive toolkit for CSV/JSON conversion, merging, structural editing, and intelligent data transformation.
         </p>
       </header>
 
-      {error && (
-        <Alert variant="destructive">
+      {currentError && (
+        <Alert variant="destructive" className="my-4">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{currentError}</AlertDescription>
         </Alert>
       )}
 
-      <Card className="shadow-xl">
-        <CardHeader>
-          <CardTitle className="flex items-center text-2xl"><UploadCloud className="mr-2 h-6 w-6" />Upload Files</CardTitle>
-          <CardDescription>Select CSV or JSON files to process. CSVs will be converted to JSON.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="smart-transforms-switch"
-              checked={applySmartTransforms}
-              onCheckedChange={setApplySmartTransforms}
-            />
-            <Label htmlFor="smart-transforms-switch" className="text-sm font-medium">
-              Apply Intelligent Transformations (for relevant CSVs)
-            </Label>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Info className="h-4 w-4 text-muted-foreground cursor-help" />
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p className="max-w-xs">Automatically applies transformations like DMS to Decimal Degrees, UTM to Lat/Lon, and URL normalization if columns like 'Lat', 'Long', 'Easting/m', 'Northing/m', 'Island', 'URL' are present in your CSV.</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
-          <input
-            type="file"
-            multiple
-            onChange={handleFileUpload}
-            accept=".csv,.json"
-            className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20 transition-colors"
-            disabled={isLoading}
-          />
-          {isLoading && (
-            <div className="space-y-2">
-              <Progress value={progress} className="w-full" />
-              <p className="text-sm text-muted-foreground text-center">Processing files... {Math.round(progress)}%</p>
-            </div>
-          )}
-          {uploadedFiles.length > 0 && !isLoading && (
-            <div className="mt-4">
-              <h3 className="font-semibold mb-2">Uploaded Files:</h3>
-              <ul className="space-y-1 text-sm list-disc list-inside">
-                {uploadedFiles.map((f) => (
-                  <li key={f.id} className="text-muted-foreground">{f.file.name} ({f.data ? (Array.isArray(f.data) ? f.data.length : 1) : 0} items)</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <Tabs value={activeMainTab} onValueChange={setActiveMainTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-3 md:grid-cols-5 gap-1 h-auto p-1">
+          <TabsTrigger value="upload" className="py-2 text-xs sm:text-sm"><UploadCloud className="mr-1 sm:mr-2 h-4 w-4" />Upload</TabsTrigger>
+          <TabsTrigger value="issues" className="py-2 text-xs sm:text-sm" disabled={!processedJson}>
+            <FileWarning className="mr-1 sm:mr-2 h-4 w-4" />Issues & UTM {!isLoading && rowsNeedingUtmInput.length > 0 && <span className="ml-2 px-2 py-0.5 text-xs font-semibold bg-destructive text-destructive-foreground rounded-full">{rowsNeedingUtmInput.length}</span>}
+            </TabsTrigger>
+          <TabsTrigger value="validation" className="py-2 text-xs sm:text-sm" disabled={!processedJson}><ListChecks className="mr-1 sm:mr-2 h-4 w-4" />Validation</TabsTrigger>
+          <TabsTrigger value="structure" className="py-2 text-xs sm:text-sm" disabled={!processedJson}><Settings2 className="mr-1 sm:mr-2 h-4 w-4" />Structure</TabsTrigger>
+          <TabsTrigger value="output" className="py-2 text-xs sm:text-sm" disabled={!processedJson}><FileJson className="mr-1 sm:mr-2 h-4 w-4" />Output</TabsTrigger>
+        </TabsList>
 
-      {processedJson && !isLoading && (
-        <Card className="shadow-xl">
-          <CardHeader>
-             <div className="flex justify-between items-center">
-              <CardTitle className="flex items-center text-2xl">
-                <FileJson className="mr-2 h-6 w-6" /> Processed Data
-              </CardTitle>
-              <div className="flex space-x-2">
-                <Button variant={activeTab === 'preview' ? "default" : "outline"} onClick={() => setActiveTab('preview')}>Preview</Button>
-                <Button variant={activeTab === 'structure' ? "default" : "outline"} onClick={() => setActiveTab('structure')}>Edit Structure</Button>
-                <Button variant={activeTab === 'ai' ? "default" : "outline"} onClick={() => setActiveTab('ai')}>AI Insights</Button>
+        <TabsContent value="upload" className="mt-6">
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center text-xl"><UploadCloud className="mr-2 h-5 w-5" />Upload Files</CardTitle>
+              <CardDescription>Select CSV or JSON files. CSVs will be parsed and can be intelligently transformed.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center space-x-2 p-3 border rounded-md bg-muted/20">
+                <Switch
+                  id="smart-transforms-switch"
+                  checked={applySmartTransforms}
+                  onCheckedChange={setApplySmartTransforms}
+                  disabled={isLoading}
+                />
+                <Label htmlFor="smart-transforms-switch" className="text-sm font-medium">
+                  Apply Intelligent Transformations
+                </Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Info className="h-4 w-4 text-muted-foreground cursor-help" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="max-w-xs">Automatically handles DMS to DD, UTM to Lat/Lon (prompts for zone if needed), and URL normalization for relevant CSV columns (Lat, Long, Easting/m, Northing/m, Island, URL).</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
-            </div>
-            <CardDescription>Preview your merged and transformed JSON data. Edit its structure or get AI insights.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {activeTab === 'preview' && (
-               <Textarea
-                value={previewData}
-                readOnly
-                rows={15}
-                className="w-full font-mono text-xs bg-muted/30"
-                placeholder="JSON output will appear here..."
+              <input
+                type="file"
+                multiple
+                onChange={handleFileUpload}
+                accept=".csv,.json"
+                className="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isLoading}
               />
-            )}
+              {isLoading && (
+                <div className="space-y-2 pt-2">
+                  <Progress value={progress} className="w-full h-2" />
+                  <p className="text-sm text-muted-foreground text-center">Processing files... {Math.round(progress)}%</p>
+                </div>
+              )}
+              {uploadedFilesData.length > 0 && !isLoading && (
+                <div className="mt-4 p-3 border rounded-md bg-muted/20">
+                  <h3 className="font-semibold mb-2 text-sm">Uploaded Files:</h3>
+                  <ul className="space-y-1 text-xs list-disc list-inside">
+                    {uploadedFilesData.map((f) => (
+                      <li key={f.id} className="text-muted-foreground">{f.fileName} ({Array.isArray(f.data) ? f.data.length : f.data ? 1 : 0} items)</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-            {activeTab === 'structure' && (
-              <div className="space-y-4">
-                <h3 className="font-semibold text-lg flex items-center"><Edit3 className="mr-2 h-5 w-5" />Edit JSON Structure</h3>
-                <p className="text-sm text-muted-foreground">Drag to reorder fields, or uncheck to exclude them from the final output.</p>
-                <div className="max-h-96 overflow-y-auto border rounded-md p-4 space-y-2 bg-background">
-                  {keyOrder.length > 0 ? keyOrder.map((keyItem, index) => (
-                    <div key={keyItem.name} className="flex items-center justify-between p-2 border rounded-md hover:bg-muted/50">
-                      <div className="flex items-center space-x-3">
-                        <Checkbox
-                          id={`key-${keyItem.name}`}
-                          checked={keyItem.included}
-                          onCheckedChange={() => handleKeyInclusionChange(keyItem.name)}
-                        />
-                        <Label htmlFor={`key-${keyItem.name}`} className="font-medium">{keyItem.name}</Label>
-                      </div>
-                      <div className="space-x-1">
-                        <Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(index, 'up')} disabled={index === 0}>↑</Button>
-                        <Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(index, 'down')} disabled={index === keyOrder.length - 1}>↓</Button>
-                      </div>
+        <TabsContent value="issues" className="mt-6">
+           <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center text-xl"><FileWarning className="mr-2 h-5 w-5 text-amber-500" />Transformation Issues & UTM Input</CardTitle>
+              <CardDescription>Review transformation errors, rows requiring UTM zone input, and manage problematic data.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {rowsNeedingUtmInput.length > 0 && (
+                <Alert variant="default" className="border-amber-500">
+                  <AlertTriangle className="h-5 w-5 text-amber-500" />
+                  <AlertTitle className="font-semibold text-amber-600">UTM Zone Input Required</AlertTitle>
+                  <AlertDescription>
+                    {rowsNeedingUtmInput.length} row(s) need UTM zone information to convert Easting/Northing to Lat/Long.
+                    Click 'Provide UTM' next to each item in the table below.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              <div>
+                <h3 className="font-semibold text-md mb-2 flex items-center"><ShieldAlert className="mr-2 h-5 w-5 text-destructive" />Issue Log & Actions</h3>
+                {sortedErrorLog.length === 0 ? (
+                  <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No transformation issues or rows requiring UTM input found. Good job!</p>
+                ) : (
+                <ScrollArea className="h-[400px] w-full border rounded-md">
+                  <Table>
+                    <TableHeader className="sticky top-0 bg-background z-10">
+                      <TableRow>
+                        <TableHead className="w-[60px]">
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('isError', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                            Include {getSortIndicator<TransformationLogEntry>('isError', issueSortConfig)}
+                          </Button>
+                        </TableHead>
+                        <TableHead className="w-[150px]">
+                          <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                           ID/Row {getSortIndicator<TransformationLogEntry>('rowIdentifier', issueSortConfig)}
+                          </Button>
+                        </TableHead>
+                        <TableHead>
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                            Fields {getSortIndicator<TransformationLogEntry>('field', issueSortConfig)}
+                          </Button>
+                        </TableHead>
+                        <TableHead>
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('details', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                            Details {getSortIndicator<TransformationLogEntry>('details', issueSortConfig)}
+                           </Button>
+                        </TableHead>
+                        <TableHead className="w-[150px] text-center">Action</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {sortedErrorLog.map((log, index) => {
+                        const rowId = `${log.fileId}-${log.originalRowIndex}`;
+                        const correspondingProcessedRow = processedJson?.find(pr => pr.__id__ === rowId);
+                        const rowIndexInProcessedJson = processedJson?.findIndex(pr => pr.__id__ === rowId) ?? -1;
+                        return (
+                          <TableRow key={`${rowId}-${log.field}-${index}`} className={rowsDeselected.has(rowId) ? 'opacity-50 bg-muted/30' : ''}>
+                            <TableCell className="text-center">
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Checkbox
+                                      checked={!rowsDeselected.has(rowId)}
+                                      onCheckedChange={() => handleRowDeselection(rowId)}
+                                      aria-label={`Toggle inclusion of row ${log.rowIdentifier}`}
+                                    />
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <p>{rowsDeselected.has(rowId) ? 'Include this row in output' : 'Exclude this row from output'}</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </TableCell>
+                            <TableCell className="text-xs font-medium" title={log.fileId}>
+                                {log.rowIdentifier}
+                                <div className="text-muted-foreground text-[10px]">File: {uploadedFilesData.find(f=>f.id === log.fileId)?.fileName}</div>
+                            </TableCell>
+                            <TableCell className="text-xs">{log.field}</TableCell>
+                            <TableCell className="text-xs">
+                              <span className={`font-semibold ${log.status === 'Error' ? 'text-destructive' : log.requiresUtmInput ? 'text-amber-600' : 'text-muted-foreground'}`}>
+                                {log.status}:
+                              </span> {log.details} 
+                              {log.originalValue !== undefined && log.originalValue !== null && String(log.originalValue).length < 50 && <span className="text-muted-foreground text-[10px]"> (Original: {String(log.originalValue)})</span>}
+                            </TableCell>
+                            <TableCell className="text-center">
+                              {log.requiresUtmInput && correspondingProcessedRow && rowIndexInProcessedJson !== -1 && !utmZoneOverrides.has(rowId) && (
+                                <Button variant="outline" size="sm" className="text-xs" onClick={() => handleUtmModalOpen(correspondingProcessedRow, rowIndexInProcessedJson)}>
+                                  Provide UTM
+                                </Button>
+                              )}
+                              {utmZoneOverrides.has(rowId) && <span className="text-xs text-green-600 flex items-center justify-center"><CheckCircle2 className="w-3 h-3 mr-1"/>UTM Provided</span>}
+                              {log.isError && !log.requiresUtmInput && <span className="text-xs text-destructive flex items-center justify-center"><XCircle className="w-3 h-3 mr-1"/>Error</span>}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                 </ScrollArea>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="validation" className="mt-6">
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center text-xl"><GitCompareArrows className="mr-2 h-5 w-5 text-blue-500" />Full Transformation Log</CardTitle>
+              <CardDescription>Compare original values with transformed values for all fields. Review statuses and details of each transformation step.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {transformationLog.length === 0 ? (
+                 <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No transformation log to display. Process some files first.</p>
+              ) : (
+              <ScrollArea className="h-[600px] w-full border rounded-md">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-background z-10">
+                    <TableRow>
+                       <TableHead className="w-[150px]">
+                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                           ID/Row {getSortIndicator<TransformationLogEntry>('rowIdentifier', validationSortConfig)}
+                          </Button>
+                        </TableHead>
+                      <TableHead>
+                        <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                           Field {getSortIndicator<TransformationLogEntry>('field', validationSortConfig)}
+                          </Button>
+                      </TableHead>
+                      <TableHead>Original Value</TableHead>
+                      <TableHead>Transformed Value</TableHead>
+                      <TableHead className="w-[100px]">
+                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('status', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                           Status {getSortIndicator<TransformationLogEntry>('status', validationSortConfig)}
+                          </Button>
+                      </TableHead>
+                      <TableHead>Details</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sortedValidationLog.map((log, index) => (
+                      <TableRow key={`${log.fileId}-${log.originalRowIndex}-${log.field}-${index}`} className={rowsDeselected.has(`${log.fileId}-${log.originalRowIndex}`) ? 'opacity-40' : ''}>
+                        <TableCell className="text-xs font-medium" title={log.fileId}>
+                            {log.rowIdentifier}
+                            <div className="text-muted-foreground text-[10px]">File: {uploadedFilesData.find(f=>f.id === log.fileId)?.fileName}</div>
+                        </TableCell>
+                        <TableCell className="text-xs">{log.field}</TableCell>
+                        <TableCell className="text-xs font-mono max-w-[150px] truncate" title={String(log.originalValue)}>{String(log.originalValue)}</TableCell>
+                        <TableCell className="text-xs font-mono max-w-[150px] truncate" title={String(log.transformedValue)}>{String(log.transformedValue)}</TableCell>
+                        <TableCell className="text-xs">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${
+                            log.status === 'Transformed' ? 'bg-blue-100 text-blue-700' :
+                            log.status === 'Filled' ? 'bg-green-100 text-green-700' :
+                            log.status === 'Error' ? 'bg-red-100 text-red-700' :
+                            log.status === 'NeedsManualUTMInput' || log.status === 'PendingUTMInput' ? 'bg-amber-100 text-amber-700' :
+                            'bg-gray-100 text-gray-700'
+                          }`}>
+                            {log.status}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-xs max-w-[200px] truncate" title={log.details}>{log.details}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+
+        <TabsContent value="structure" className="mt-6">
+            <Card className="shadow-lg">
+                <CardHeader>
+                    <CardTitle className="flex items-center text-xl"><Settings2 className="mr-2 h-5 w-5" />Edit JSON Structure</CardTitle>
+                    <CardDescription>Reorder fields by dragging, or uncheck to exclude them from the final output. These settings apply to all files.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    {keyOrderConfig.length > 0 ? (
+                        <ScrollArea className="h-[400px] w-full border rounded-md p-2 bg-muted/20">
+                        <div className="space-y-2 p-2">
+                        {keyOrderConfig.sort((a,b) => a.order - b.order).map((keyItem) => (
+                            <div key={keyItem.name} className="flex items-center justify-between p-3 border rounded-md bg-background shadow-sm hover:shadow-md transition-shadow">
+                                <div className="flex items-center space-x-3">
+                                    <Checkbox
+                                        id={`key-${keyItem.name}`}
+                                        checked={keyItem.included}
+                                        onCheckedChange={() => handleKeyInclusionChange(keyItem.name)}
+                                        aria-label={`Include field ${keyItem.name}`}
+                                    />
+                                    <Label htmlFor={`key-${keyItem.name}`} className="font-medium text-sm">{keyItem.name}</Label>
+                                </div>
+                                <div className="space-x-1">
+                                    <TooltipProvider>
+                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(keyItem.name, 'up')} disabled={keyItem.order === 0}>↑</Button></TooltipTrigger><TooltipContent><p>Move Up</p></TooltipContent></Tooltip>
+                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(keyItem.name, 'down')} disabled={keyItem.order === keyOrderConfig.length - 1}>↓</Button></TooltipTrigger><TooltipContent><p>Move Down</p></TooltipContent></Tooltip>
+                                    </TooltipProvider>
+                                </div>
+                            </div>
+                        ))}
+                        </div>
+                        </ScrollArea>
+                    ) : (
+                        <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No fields to display. Process some files first and ensure they have data.</p>
+                    )}
+                </CardContent>
+            </Card>
+        </TabsContent>
+
+        <TabsContent value="output" className="mt-6">
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="flex items-center text-xl"><FileJson className="mr-2 h-5 w-5" />Final Output Preview</CardTitle>
+              <CardDescription>This is a preview of your final JSON data after merging, transformations, and structure edits. Only the first 10 records are shown here.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <ScrollArea className="h-[400px] w-full border rounded-md bg-muted/20">
+                <Textarea
+                    value={previewData}
+                    readOnly
+                    rows={20}
+                    className="w-full font-mono text-xs bg-background p-2" 
+                    placeholder="JSON output will appear here..."
+                />
+              </ScrollArea>
+
+              <div>
+                <h3 className="font-semibold text-md mb-2 flex items-center"><Lightbulb className="mr-2 h-5 w-5 text-yellow-400" />AI Insights</h3>
+                 <div className="p-4 border rounded-md space-y-4 bg-muted/20">
+                    {aiSuggestions && aiSuggestions.length > 0 ? (
+                        <div>
+                            <h4 className="font-medium text-sm mb-1">Transformation Suggestions:</h4>
+                            <ul className="list-disc pl-5 space-y-1 text-xs text-muted-foreground">
+                                {aiSuggestions.map((suggestion, i) => <li key={i}>{suggestion}</li>)}
+                            </ul>
+                        </div>
+                    ) : (
+                        <p className="text-xs text-muted-foreground">No AI transformation suggestions available for the current data.</p>
+                    )}
+                    <Separator />
+                    <div className="flex justify-between items-center">
+                        <h4 className="font-medium text-sm">Column Descriptions:</h4>
+                        <Button onClick={fetchColumnDescriptions} variant="outline" size="sm" disabled={isLoading || !processedJson || keyOrderConfig.filter(k=>k.included).length === 0} className="text-xs">
+                        {isLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Sparkles className="mr-1 h-3 w-3" />}
+                        Generate
+                        </Button>
                     </div>
-                  )) : <p className="text-muted-foreground text-center">No fields to display. Ensure data is loaded.</p>}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'ai' && (
-              <div className="space-y-6">
-                <div>
-                  <h3 className="font-semibold text-lg flex items-center mb-2">
-                    <Lightbulb className="mr-2 h-5 w-5 text-yellow-400" /> AI Transformation Suggestions
-                  </h3>
-                  {aiSuggestions && aiSuggestions.length > 0 ? (
-                    <ul className="list-disc pl-5 space-y-1 text-sm">
-                      {aiSuggestions.map((suggestion, i) => <li key={i}>{suggestion}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No AI suggestions available for the current CSV data, or AI features are disabled.</p>
-                  )}
-                </div>
-                <Separator />
-                <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <h3 className="font-semibold text-lg flex items-center">
-                       <Info className="mr-2 h-5 w-5 text-blue-400" /> AI Column Descriptions
-                    </h3>
-                    <Button onClick={fetchColumnDescriptions} variant="outline" size="sm" disabled={isLoading || !processedJson}>
-                      {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                      Generate Descriptions
-                    </Button>
-                  </div>
-                  {showColumnDescriptions && columnDescriptions ? (
-                     <div className="max-h-96 overflow-y-auto border rounded-md">
+                    {showColumnDescriptions && columnDescriptions ? (
+                        <ScrollArea className="h-[200px] border rounded-md p-2 bg-background">
                         <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="w-[200px]">Column Name</TableHead>
-                              <TableHead>Description</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
+                            <TableHeader><TableRow><TableHead className="w-[150px] text-xs">Column</TableHead><TableHead className="text-xs">AI Description</TableHead></TableRow></TableHeader>
+                            <TableBody>
                             {Object.entries(columnDescriptions).map(([col, desc]) => (
-                              <TableRow key={col}>
-                                <TableCell className="font-medium">{col}</TableCell>
-                                <TableCell>{desc}</TableCell>
-                              </TableRow>
+                                <TableRow key={col}><TableCell className="font-medium text-xs">{col}</TableCell><TableCell className="text-xs">{desc}</TableCell></TableRow>
                             ))}
-                          </TableBody>
+                            </TableBody>
                         </Table>
-                      </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Click "Generate Descriptions" to see AI-powered insights for your CSV columns.</p>
-                  )}
-                </div>
+                        </ScrollArea>
+                    ) : (
+                        <p className="text-xs text-muted-foreground">Click "Generate" for AI-powered column descriptions based on your selected fields.</p>
+                    )}
+                 </div>
               </div>
-            )}
-            <div className="mt-6 flex justify-end">
-              <Button onClick={handleDownload} disabled={!finalJsonOutput || finalJsonOutput.length === 0} className="bg-accent hover:bg-accent/90 text-accent-foreground">
-                <Download className="mr-2 h-5 w-5" /> Download Processed JSON
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+
+              <div className="mt-6 flex justify-end">
+                <Button 
+                    onClick={handleDownload} 
+                    disabled={!finalJsonOutputForPreview || finalJsonOutputForPreview.length === 0 || isLoading} 
+                    className="bg-accent hover:bg-accent/90 text-accent-foreground"
+                >
+                  <Download className="mr-2 h-5 w-5" /> Download Processed JSON
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {isUtmModalOpen && currentRowForUtmInput && (
+        <UTMInputModal
+          isOpen={isUtmModalOpen}
+          onClose={() => setIsUtmModalOpen(false)}
+          onSave={handleUtmSave}
+          rowData={currentRowForUtmInput}
+        />
       )}
 
-      <footer className="text-center py-6 mt-12 border-t">
-        <p className="text-sm text-muted-foreground">
+      <footer className="text-center py-6 mt-8 border-t">
+        <p className="text-xs text-muted-foreground">
           &copy; {new Date().getFullYear()} DataForge Studio. Powered by Next.js & Genkit.
         </p>
       </footer>
     </div>
   );
 }
-
-// TooltipProvider and Tooltip for the Info icon
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
+// Helper to get a display identifier for a row
+function getRowIdentifier(row: JsonObject, rowIndex: number, fileName: string): string {
+  const psmKeys = ["PSM Station Number", "PSM_Station_Number", "PSMNo", "PSM_No", "ID", "psm_id"];
+  for (const key of psmKeys) {
+    if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
+      return String(row[key]);
+    }
+  }
+  return `${fileName} Original Row ${rowIndex + 1}`;
+}
