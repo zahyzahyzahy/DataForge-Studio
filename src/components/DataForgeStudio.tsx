@@ -12,7 +12,7 @@ import { applyIntelligentTransformations } from '@/lib/data-transformer';
 import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List, Link2Off, MapPinOff, MapPin } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -44,7 +44,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import UTMInputModal from './UTMInputModal';
-import type { FileWithData as OriginalFileWithData, ProcessedJsonArray, ProcessedRow, TransformationLogEntry, UTMZone, RowForUTMInput, ApplyTransformationsResult } from '@/types/data';
+import IslandUrlInputModal from './IslandUrlInputModal';
+import type { FileWithData as OriginalFileWithData, ProcessedJsonArray, ProcessedRow, TransformationLogEntry, UTMZone, RowForUTMInput, ApplyTransformationsResult, UTMModalInputData, IslandToUrlMap } from '@/types/data';
 
 
 interface KeyConfig {
@@ -91,7 +92,12 @@ export default function DataForgeStudio() {
 
   const [isUtmModalOpen, setIsUtmModalOpen] = useState(false);
   const [currentRowForUtmInput, setCurrentRowForUtmInput] = useState<RowForUTMInput | null>(null);
-  const [utmZoneOverrides, setUtmZoneOverrides] = useState<Map<string, UTMZone | string>>(new Map());
+  const [utmZoneOverrides, setUtmZoneOverrides] = useState<Map<string, UTMModalInputData>>(new Map()); // Updated to store UTMModalInputData
+
+  const [isIslandUrlModalOpen, setIsIslandUrlModalOpen] = useState(false);
+  const [currentIslandForUrlInput, setCurrentIslandForUrlInput] = useState<string | null>(null);
+  const [userProvidedIslandUrls, setUserProvidedIslandUrls] = useState<IslandToUrlMap>({});
+
 
   const { toast } = useToast();
 
@@ -105,6 +111,9 @@ export default function DataForgeStudio() {
   const [bulkSelectedZoneValue, setBulkSelectedZoneValue] = useState<string>('43N'); // Default for dropdown
   const [bulkCustomProjString, setBulkCustomProjString] = useState<string>(''); // For manual input
 
+  // State for editing PSM numbers in output
+  const [editablePsmNumbers, setEditablePsmNumbers] = useState<Record<string, string>>({}); // __id__ -> new PSM number
+
 
   const resetStateForNewUpload = () => {
     setUploadedFilesData([]);
@@ -117,6 +126,8 @@ export default function DataForgeStudio() {
     setTransformationLog([]);
     setRowsDeselected(new Set());
     setUtmZoneOverrides(new Map());
+    setUserProvidedIslandUrls({});
+    setEditablePsmNumbers({});
     setActiveMainTab('upload');
     setProgress(0);
     // Reset bulk UTM state
@@ -175,7 +186,7 @@ export default function DataForgeStudio() {
     setUploadedFilesData(newFilesToProcess);
 
     if (newFilesToProcess.length > 0) {
-      await processAndTransformFiles(newFilesToProcess, applySmartTransforms, utmZoneOverrides);
+      await processAndTransformFiles(newFilesToProcess, applySmartTransforms, utmZoneOverrides, userProvidedIslandUrls);
       const firstFileWithData = newFilesToProcess.find(f => f.data && (f.data as JsonObject[]).length > 0);
       if (firstFileWithData && (firstFileWithData.file.type === 'text/csv' || firstFileWithData.file.name.endsWith('.csv'))) {
           const headers = Object.keys((firstFileWithData.data as JsonObject[])[0]);
@@ -199,7 +210,8 @@ export default function DataForgeStudio() {
   const processAndTransformFiles = useCallback(async (
     filesToProcess: OriginalFileWithData[],
     applyTransforms: boolean,
-    currentUtmOverrides: Map<string, UTMZone | string>
+    currentUtmOverrides: Map<string, UTMModalInputData>,
+    currentIslandUrlOverrides: IslandToUrlMap
   ) => {
     if (filesToProcess.length === 0) {
       setProcessedJson(null);
@@ -218,13 +230,19 @@ export default function DataForgeStudio() {
 
     let transformationResult: ApplyTransformationsResult;
     if (applyTransforms) {
-      transformationResult = applyIntelligentTransformations(mappedInput, currentUtmOverrides);
+      // Pass only the utmInput part of UTMModalInputData for utmZoneOverrides in applyIntelligentTransformations
+      const simpleUtmOverrides = new Map<string, UTMZone | string>();
+      currentUtmOverrides.forEach((value, key) => {
+        simpleUtmOverrides.set(key, value.utmInput);
+      });
+      transformationResult = applyIntelligentTransformations(mappedInput, simpleUtmOverrides, currentIslandUrlOverrides);
     } else {
+      // Simplified processing when transformations are off
       const basicProcessedData: ProcessedJsonArray = [];
       const basicLog: TransformationLogEntry[] = [];
       mappedInput.forEach(file => {
         file.data.forEach((originalRow, idx) => {
-          const rowId = getRowIdentifier(originalRow, idx, file.fileName);
+          const { identifier: rowId, keyUsed: identifierKeyUsed } = getRowIdentifierDetails(originalRow, idx, file.fileName);
           const uniqueProcessedRowId = `${file.fileId}-${idx}`;
           const processedRow: ProcessedRow = {
             ...originalRow,
@@ -233,6 +251,7 @@ export default function DataForgeStudio() {
             __fileId__: file.fileId,
             __fileName__: file.fileName,
             __rowIdentifier__: rowId,
+            __identifierKey__: identifierKeyUsed,
           };
           basicProcessedData.push(processedRow);
           Object.keys(originalRow).forEach(key => {
@@ -253,47 +272,121 @@ export default function DataForgeStudio() {
       transformationResult = { transformedData: basicProcessedData, transformationLog: basicLog };
     }
     
+    // If E/N data was provided via modal and used, update the processedJson directly
+    // This logic might need refinement if applyIntelligentTransformations doesn't directly use the E/N from overrides
+    // For now, assume applyIntelligentTransformations handles it if E/N was part of the override logic for that row.
+    // If applyIntelligentTransformations needs explicit E/N, it should take the full UTMModalInputData map.
+    // For simplicity, we're assuming applyIntelligentTransformations primarily uses the `utmInput` (zone/proj string) from the overrides.
+    // If a row had its E/N updated via modal, that change needs to be reflected in `transformationResult.transformedData`
+    // or `applyIntelligentTransformations` must be re-run with the E/N modified `originalRow`.
+    // This re-processing is typically handled by the caller of processAndTransformFiles after modal save.
+
     setProcessedJson(transformationResult.transformedData);
     setTransformationLog(transformationResult.transformationLog);
     
     if (transformationResult.transformedData && transformationResult.transformedData.length > 0) {
-      const sampleKeys = Object.keys(transformationResult.transformedData[0]).filter(k => !k.startsWith('__'));
+      const sampleKeys = Object.keys(transformationResult.transformedData[0]).filter(k => !k.startsWith('__') && k !== '__requiresURLInputForIsland__');
       setKeyOrderConfig(sampleKeys.map((name, index) => ({ name, included: true, order: index })));
+      
+      // Initialize editablePsmNumbers
+      const initialPsmNumbers: Record<string, string> = {};
+      transformationResult.transformedData.forEach(row => {
+        if(row.__identifierKey__ && row[row.__identifierKey__]) {
+          initialPsmNumbers[row.__id__] = String(row[row.__identifierKey__]);
+        } else {
+          initialPsmNumbers[row.__id__] = row.__rowIdentifier__; // Fallback to the generic row identifier
+        }
+      });
+      setEditablePsmNumbers(initialPsmNumbers);
+
     } else {
       setKeyOrderConfig([]);
+      setEditablePsmNumbers({});
     }
     
     toast({ title: 'Files Processed', description: `${filesToProcess.length} file(s) loaded. Transformations applied: ${applyTransforms}.`, variant: 'default' });
     setProgress(100);
     setIsLoading(false);
 
-    const needsInput = transformationResult.transformedData.some(row => row.__needsUTMInput__ && !currentUtmOverrides.has(row.__id__));
-    if (needsInput) {
+    const needsUtmInput = transformationResult.transformedData.some(row => (row.__needsUTMZoneInput__ || row.__needsENAndUTMInput__) && !currentUtmOverrides.has(row.__id__));
+    const needsUrlInput = transformationResult.transformedData.some(row => row.__requiresURLInputForIsland__ && !currentIslandUrlOverrides[row.__requiresURLInputForIsland__ as string]);
+
+    if (needsUtmInput || needsUrlInput) {
       setActiveMainTab('issues'); 
-      toast({ title: "Action Required", description: "Some rows require UTM zone input. Check the 'Issues & UTM' tab.", variant: "default", duration: 5000});
+      let toastMessage = "Action Required: ";
+      if (needsUtmInput) toastMessage += "Some rows require UTM/Coordinate input. ";
+      if (needsUrlInput) toastMessage += "Some islands require URL input. ";
+      toastMessage += "Check the 'Issues & Inputs' tab.";
+      toast({ title: "Action Required", description: toastMessage, variant: "default", duration: 7000});
     }
 
-  }, [toast, applySmartTransforms]);
+  }, [toast]);
 
 
   const handleUtmModalOpen = (row: ProcessedRow, indexInProcessedJson: number) => {
-     setCurrentRowForUtmInput({row, rowIndexInProcessedJson: indexInProcessedJson});
+     setCurrentRowForUtmInput({
+       row, 
+       rowIndexInProcessedJson: indexInProcessedJson,
+       requiresENInput: !!row.__needsENAndUTMInput__ && !utmZoneOverrides.has(row.__id__) // only require E/N if flagged AND not yet overridden
+      });
      setIsUtmModalOpen(true);
   };
 
-  const handleUtmSave = async (utmInput: UTMZone | string) => {
+  const handleUtmSave = async (utmData: UTMModalInputData) => {
     if (!currentRowForUtmInput) return;
     
     const updatedOverrides = new Map(utmZoneOverrides);
-    updatedOverrides.set(currentRowForUtmInput.row.__id__, utmInput);
+    updatedOverrides.set(currentRowForUtmInput.row.__id__, utmData);
     setUtmZoneOverrides(updatedOverrides);
     setIsUtmModalOpen(false);
     
-    if (uploadedFilesData.length > 0) {
-      toast({title: "Re-processing", description: "Applying new UTM information...", variant: "default"});
-      await processAndTransformFiles(uploadedFilesData, applySmartTransforms, updatedOverrides);
+    // If E/N data was also provided, we need to update the original data source and re-process.
+    // This is a bit complex as `uploadedFilesData` holds the "original" state.
+    // We might need to modify a temporary copy of `uploadedFilesData` or directly update `processedJson`
+    // and then let `applyIntelligentTransformations` re-evaluate with new zone.
+    
+    let filesToReProcess = uploadedFilesData;
+    if (utmData.easting !== undefined && utmData.northing !== undefined) {
+        // Find and update the specific row in uploadedFilesData
+        const fileIndex = uploadedFilesData.findIndex(f => f.id === currentRowForUtmInput.row.__fileId__);
+        if (fileIndex !== -1) {
+            const dataIndex = currentRowForUtmInput.row.__originalRowIndex__;
+            const fileData = uploadedFilesData[fileIndex].data;
+            if (Array.isArray(fileData) && fileData[dataIndex]) {
+                const eastingKeyToUpdate = Object.keys(fileData[dataIndex]).find(k => k.toLowerCase() === 'easting/m' || k.toLowerCase() === 'easting') || 'Easting/m';
+                const northingKeyToUpdate = Object.keys(fileData[dataIndex]).find(k => k.toLowerCase() === 'northing/m' || k.toLowerCase() === 'northing') || 'Northing/m';
+                
+                // Create a deep copy to avoid direct state mutation if `fileData` items are shared objects
+                const updatedFilesData = JSON.parse(JSON.stringify(uploadedFilesData));
+                updatedFilesData[fileIndex].data[dataIndex][eastingKeyToUpdate] = parseFloat(utmData.easting);
+                updatedFilesData[fileIndex].data[dataIndex][northingKeyToUpdate] = parseFloat(utmData.northing);
+                filesToReProcess = updatedFilesData;
+            }
+        }
+    }
+
+
+    if (filesToReProcess.length > 0) {
+      toast({title: "Re-processing", description: "Applying new UTM/Coordinate information...", variant: "default"});
+      await processAndTransformFiles(filesToReProcess, applySmartTransforms, updatedOverrides, userProvidedIslandUrls);
     }
   };
+
+  const handleIslandUrlModalOpen = (islandName: string) => {
+    setCurrentIslandForUrlInput(islandName);
+    setIsIslandUrlModalOpen(true);
+  };
+
+  const handleIslandUrlSave = async (islandName: string, url: string) => {
+    const newIslandUrls = { ...userProvidedIslandUrls, [islandName]: url };
+    setUserProvidedIslandUrls(newIslandUrls);
+    setIsIslandUrlModalOpen(false);
+    if (uploadedFilesData.length > 0) {
+      toast({title: "Re-processing", description: "Applying new Island URL information...", variant: "default"});
+      await processAndTransformFiles(uploadedFilesData, applySmartTransforms, utmZoneOverrides, newIslandUrls);
+    }
+  };
+
 
   // Update bulkUtmZone based on UI selections for bulk apply
   useEffect(() => {
@@ -327,16 +420,15 @@ export default function DataForgeStudio() {
     let changesMade = 0;
   
     processedJson?.forEach(row => {
-      if (row.__fileId__ === selectedFileIdForBulkUtm && row.__needsUTMInput__) {
-        // Check if override already exists and is different, or just apply if needed
-        // For simplicity, this will apply/overwrite for any row needing input in the selected file
-        newOverrides.set(row.__id__, bulkUtmZone);
+      // Apply if the row needs UTM zone input (E/N presumed present) AND it's in the selected file
+      if (row.__fileId__ === selectedFileIdForBulkUtm && row.__needsUTMZoneInput__) {
+        newOverrides.set(row.__id__, { utmInput: bulkUtmZone }); // Only apply zone, E/N assumed present
         changesMade++;
       }
     });
   
     if (changesMade === 0) {
-      toast({ title: "No Rows Affected", description: `No rows in the selected file required UTM input update with this zone.`, variant: "default" });
+      toast({ title: "No Rows Affected", description: `No rows in the selected file required UTM zone input with this zone. Rows needing E/N values must be handled individually.`, variant: "default" });
       return;
     }
   
@@ -349,7 +441,7 @@ export default function DataForgeStudio() {
       variant: "default" 
     });
   
-    await processAndTransformFiles(uploadedFilesData, applySmartTransforms, newOverrides);
+    await processAndTransformFiles(uploadedFilesData, applySmartTransforms, newOverrides, userProvidedIslandUrls);
   };
 
 
@@ -390,7 +482,25 @@ export default function DataForgeStudio() {
   const getFinalJson = useCallback(() => {
     if (!processedJson) return null;
     
-    const filteredData = processedJson.filter(row => !rowsDeselected.has(row.__id__));
+    let filteredData = processedJson.filter(row => !rowsDeselected.has(row.__id__));
+
+    // Apply edited PSM numbers
+    filteredData = filteredData.map(row => {
+      const newPsmNumber = editablePsmNumbers[row.__id__];
+      if (newPsmNumber !== undefined && row.__identifierKey__) {
+        return { ...row, [row.__identifierKey__]: newPsmNumber };
+      }
+      // If no specific identifier key or not editable, return original
+      // Or if it's a generic identifier (__rowIdentifier__) and it was edited
+      if (newPsmNumber !== undefined && !row.__identifierKey__ && row.__rowIdentifier__ !== newPsmNumber) {
+         // This case is tricky. If __rowIdentifier__ was generic (like "FileX Row Y")
+         // and it's edited, it doesn't map to a specific column.
+         // For simplicity, we assume edits are primarily for rows with a real identifierKey.
+         // However, if we want to allow changing the __rowIdentifier__ itself when no key, that logic would be different.
+         // For now, prioritize __identifierKey__ for edits.
+      }
+      return row;
+    });
 
     const orderedKeys = keyOrderConfig
       .filter(k => k.included)
@@ -403,7 +513,7 @@ export default function DataForgeStudio() {
     }, {} as Record<string, boolean>);
 
     return restructureJsonArray(filteredData, orderedKeys, includedKeysMap, true); 
-  }, [processedJson, keyOrderConfig, rowsDeselected]);
+  }, [processedJson, keyOrderConfig, rowsDeselected, editablePsmNumbers]);
 
 
   const handleDownload = () => {
@@ -449,28 +559,42 @@ export default function DataForgeStudio() {
   const finalJsonOutputForPreview = getFinalJson();
   const previewData = finalJsonOutputForPreview ? JSON.stringify(finalJsonOutputForPreview.slice(0, 10), null, 2) : "No data to display or all rows deselected.";
 
-  const errorLogEntries = useMemo(() => transformationLog.filter(log => log.isError || log.requiresUtmInput), [transformationLog]);
+  const errorLogEntries = useMemo(() => transformationLog.filter(log => log.isError || log.requiresUtmInput || log.status === 'NeedsManualUTMInput'), [transformationLog]);
   
-  const rowsNeedingUtmInput = useMemo(() => {
+  const rowsNeedingInput = useMemo(() => {
     if (!processedJson) return [];
     return processedJson.reduce((acc, row, index) => {
-      if (row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__)) {
-        acc.push({ row, rowIndexInProcessedJson: index });
+      const needsUtm = (row.__needsUTMZoneInput__ || row.__needsENAndUTMInput__) && !utmZoneOverrides.has(row.__id__);
+      const needsUrl = row.__requiresURLInputForIsland__ && !userProvidedIslandUrls[row.__requiresURLInputForIsland__ as string];
+      if (needsUtm || needsUrl) {
+        acc.push({ row, rowIndexInProcessedJson: index, requiresENInput: !!row.__needsENAndUTMInput__ });
       }
       return acc;
     }, [] as RowForUTMInput[]);
-  }, [processedJson, utmZoneOverrides]);
+  }, [processedJson, utmZoneOverrides, userProvidedIslandUrls]);
 
-  const filesWithPendingUtmInput = useMemo(() => {
+
+  const filesWithPendingUtmInput = useMemo(() => { // Specifically for bulk UTM zone application (where E/N is present)
     if (!processedJson) return [];
     const fileIdsRequiringInput = new Set<string>();
     processedJson.forEach(row => {
-      if (row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__)) {
+      if (row.__needsUTMZoneInput__ && !utmZoneOverrides.has(row.__id__)) { // Only zone needed
         fileIdsRequiringInput.add(row.__fileId__);
       }
     });
     return uploadedFilesData.filter(file => fileIdsRequiringInput.has(file.id));
   }, [processedJson, utmZoneOverrides, uploadedFilesData]);
+
+  const islandsNeedingUrlInput = useMemo(() => {
+    if (!processedJson) return [];
+    const islands = new Set<string>();
+    processedJson.forEach(row => {
+      if (row.__requiresURLInputForIsland__ && !userProvidedIslandUrls[row.__requiresURLInputForIsland__ as string]) {
+        islands.add(row.__requiresURLInputForIsland__ as string);
+      }
+    });
+    return Array.from(islands);
+  }, [processedJson, userProvidedIslandUrls]);
 
 
   const requestSort = <T, >(key: keyof T, currentSortConfig: SortConfig<T>, setSortConfig: React.Dispatch<React.SetStateAction<SortConfig<T>>>) => {
@@ -527,6 +651,10 @@ export default function DataForgeStudio() {
     return Object.keys(finalJsonOutputForPreview[0]);
   }, [finalJsonOutputForPreview]);
 
+  const handlePsmNumberChange = (rowId: string, newValue: string) => {
+    setEditablePsmNumbers(prev => ({...prev, [rowId]: newValue}));
+  }
+
 
   return (
     <div className="space-y-6 pb-16">
@@ -551,7 +679,7 @@ export default function DataForgeStudio() {
         <TabsList className="grid w-full grid-cols-3 md:grid-cols-5 gap-1 h-auto p-1">
           <TabsTrigger value="upload" className="py-2 text-xs sm:text-sm"><UploadCloud className="mr-1 sm:mr-2 h-4 w-4" />Upload</TabsTrigger>
           <TabsTrigger value="issues" className="py-2 text-xs sm:text-sm" disabled={!processedJson}>
-            <FileWarning className="mr-1 sm:mr-2 h-4 w-4" />Issues & UTM {!isLoading && rowsNeedingUtmInput.length > 0 && <span className="ml-2 px-2 py-0.5 text-xs font-semibold bg-destructive text-destructive-foreground rounded-full">{rowsNeedingUtmInput.length}</span>}
+            <FileWarning className="mr-1 sm:mr-2 h-4 w-4" />Inputs & Issues {!isLoading && rowsNeedingInput.length > 0 && <span className="ml-2 px-2 py-0.5 text-xs font-semibold bg-destructive text-destructive-foreground rounded-full">{rowsNeedingInput.length}</span>}
             </TabsTrigger>
           <TabsTrigger value="validation" className="py-2 text-xs sm:text-sm" disabled={!processedJson}><ListChecks className="mr-1 sm:mr-2 h-4 w-4" />Validation</TabsTrigger>
           <TabsTrigger value="structure" className="py-2 text-xs sm:text-sm" disabled={!processedJson}><Settings2 className="mr-1 sm:mr-2 h-4 w-4" />Structure</TabsTrigger>
@@ -581,7 +709,7 @@ export default function DataForgeStudio() {
                       <Info className="h-4 w-4 text-muted-foreground cursor-help" />
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p className="max-w-xs">Automatically handles DMS to DD, UTM to Lat/Lon (prompts for zone if needed), and URL normalization for relevant CSV columns (Lat, Long, Easting/m, Northing/m, Island, URL).</p>
+                      <p className="max-w-xs">Automatically handles DMS to DD, UTM to Lat/Lon (prompts for zone/coordinates if needed), and URL normalization for relevant CSV columns (Lat, Long, Easting/m, Northing/m, Island, URL).</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -617,23 +745,24 @@ export default function DataForgeStudio() {
         <TabsContent value="issues" className="mt-6">
            <Card className="shadow-lg">
             <CardHeader>
-              <CardTitle className="flex items-center text-xl"><FileWarning className="mr-2 h-5 w-5 text-amber-500" />Transformation Issues & UTM Input</CardTitle>
-              <CardDescription>Review transformation errors, rows requiring UTM zone input, and manage problematic data. You can also apply a UTM zone to all applicable rows in a single file.</CardDescription>
+              <CardTitle className="flex items-center text-xl"><FileWarning className="mr-2 h-5 w-5 text-amber-500" />Transformation Issues & Manual Inputs</CardTitle>
+              <CardDescription>Review transformation errors, rows requiring manual input (UTM zone, coordinates, Island URLs), and manage problematic data. You can also apply a UTM zone to all applicable rows in a single file.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {rowsNeedingUtmInput.length > 0 && (
+              {rowsNeedingInput.length > 0 && (
                 <Alert variant="default" className="border-amber-500">
                   <AlertTriangle className="h-5 w-5 text-amber-500" />
-                  <AlertTitle className="font-semibold text-amber-600">UTM Zone Input Required</AlertTitle>
+                  <AlertTitle className="font-semibold text-amber-600">Manual Input Required</AlertTitle>
                   <AlertDescription>
-                    {rowsNeedingUtmInput.length} row(s) need UTM zone information. Use the 'Provide UTM' button for individual rows below, or use the 'Bulk Apply UTM Zone' section.
+                    {rowsNeedingInput.length} row(s) need manual input (UTM/Coordinates or Island URL). Use the 'Provide Input' buttons below, or use bulk tools if applicable.
                   </AlertDescription>
                 </Alert>
               )}
 
-              {filesWithPendingUtmInput.length > 0 && (
+              {filesWithPendingUtmInput.length > 0 && ( // For bulk UTM zone application
                 <div className="p-4 border rounded-md space-y-4 bg-muted/10">
-                  <h3 className="font-semibold text-md flex items-center"><FileCog className="mr-2 h-5 w-5 text-primary" />Bulk Apply UTM Zone to a File</h3>
+                  <h3 className="font-semibold text-md flex items-center"><MapPin className="mr-2 h-5 w-5 text-primary" />Bulk Apply UTM Zone to a File</h3>
+                  <p className="text-xs text-muted-foreground">This applies a UTM zone to rows in the selected file that have Easting/Northing data but are missing the zone. Rows needing Easting/Northing values must be addressed individually.</p>
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
                     <div>
                         <Label htmlFor="bulk-utm-file-select" className="text-xs">Select File</Label>
@@ -692,8 +821,22 @@ export default function DataForgeStudio() {
                     Example for UTM Zone 43N: <code>+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs +hemisphere=N</code>
                   </p>
                   <Button onClick={handleBulkApplyUtmToFile} disabled={isLoading || !selectedFileIdForBulkUtm || !bulkUtmZone} size="sm">
-                    <Sparkles className="mr-2 h-4 w-4" /> Apply to Selected File
+                    <Sparkles className="mr-2 h-4 w-4" /> Apply Zone to Selected File
                   </Button>
+                </div>
+              )}
+
+              {islandsNeedingUrlInput.length > 0 && (
+                <div className="p-4 border rounded-md space-y-2 bg-muted/10">
+                   <h3 className="font-semibold text-md flex items-center"><Link2Off className="mr-2 h-5 w-5 text-orange-500" />Missing Island URLs</h3>
+                   <p className="text-xs text-muted-foreground">The following islands are missing URLs. Click to provide one.</p>
+                   <div className="flex flex-wrap gap-2">
+                    {islandsNeedingUrlInput.map(islandName => (
+                        <Button key={islandName} variant="outline" size="sm" onClick={() => handleIslandUrlModalOpen(islandName)}>
+                           {islandName}
+                        </Button>
+                    ))}
+                   </div>
                 </div>
               )}
 
@@ -701,7 +844,7 @@ export default function DataForgeStudio() {
               <div>
                 <h3 className="font-semibold text-md mb-2 flex items-center"><ShieldAlert className="mr-2 h-5 w-5 text-destructive" />Issue Log & Actions</h3>
                 {sortedErrorLog.length === 0 ? (
-                  <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No transformation issues or rows requiring UTM input found. Good job!</p>
+                  <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No transformation issues or rows requiring manual input found. Good job!</p>
                 ) : (
                 <ScrollArea className="h-[400px] w-full border rounded-md">
                   <Table>
@@ -735,6 +878,33 @@ export default function DataForgeStudio() {
                         const rowId = `${log.fileId}-${log.originalRowIndex}`;
                         const correspondingProcessedRow = processedJson?.find(pr => pr.__id__ === rowId);
                         const rowIndexInProcessedJson = processedJson?.findIndex(pr => pr.__id__ === rowId) ?? -1;
+                        
+                        let actionButton = null;
+                        if (correspondingProcessedRow) {
+                            const needsUtmOrEN = (correspondingProcessedRow.__needsUTMZoneInput__ || correspondingProcessedRow.__needsENAndUTMInput__);
+                            const isUtmProvidedForRow = utmZoneOverrides.has(rowId);
+                            const needsUrl = correspondingProcessedRow.__requiresURLInputForIsland__ && !userProvidedIslandUrls[correspondingProcessedRow.__requiresURLInputForIsland__ as string];
+
+                            if (needsUtmOrEN && !isUtmProvidedForRow) {
+                                actionButton = (
+                                     <Button variant="outline" size="sm" className="text-xs h-7 px-2" onClick={() => handleUtmModalOpen(correspondingProcessedRow, rowIndexInProcessedJson)}>
+                                       <MapPinOff className="w-3 h-3 mr-1"/> Provide UTM/Coords
+                                    </Button>
+                                );
+                            } else if (isUtmProvidedForRow && (log.status === 'PendingUTMInput' || log.status === 'NeedsENAndUTMInput')) {
+                                 actionButton = <span className="text-xs text-green-600 flex items-center justify-center"><CheckCircle2 className="w-3 h-3 mr-1"/>Input Provided</span>;
+                            } else if (needsUrl) {
+                                 actionButton = (
+                                    <Button variant="outline" size="sm" className="text-xs h-7 px-2" onClick={() => handleIslandUrlModalOpen(correspondingProcessedRow.__requiresURLInputForIsland__ as string)}>
+                                      <Link2Off className="w-3 h-3 mr-1"/> Provide URL
+                                    </Button>
+                                );
+                            } else if (log.isError) {
+                                actionButton = <span className="text-xs text-destructive flex items-center justify-center"><XCircle className="w-3 h-3 mr-1"/>Error</span>;
+                            }
+                        }
+
+
                         return (
                           <TableRow key={`${rowId}-${log.field}-${index}`} className={rowsDeselected.has(rowId) ? 'opacity-50 bg-muted/30' : ''}>
                             <TableCell className="text-center px-2 py-1">
@@ -759,19 +929,13 @@ export default function DataForgeStudio() {
                             </TableCell>
                             <TableCell className="text-xs px-2 py-1">{log.field}</TableCell>
                             <TableCell className="text-xs px-2 py-1">
-                              <span className={`font-semibold ${log.status === 'Error' ? 'text-destructive' : log.requiresUtmInput ? 'text-amber-600' : 'text-muted-foreground'}`}>
+                              <span className={`font-semibold ${log.status === 'Error' ? 'text-destructive' : (log.status === 'PendingUTMInput' || log.status === 'NeedsENAndUTMInput' || log.status === 'NeedsManualUTMInput') ? 'text-amber-600' : 'text-muted-foreground'}`}>
                                 {log.status}:
                               </span> {log.details} 
                               {log.originalValue !== undefined && log.originalValue !== null && String(log.originalValue).length < 50 && <span className="text-muted-foreground text-[10px]"> (Original: {String(log.originalValue)})</span>}
                             </TableCell>
                             <TableCell className="text-center px-2 py-1">
-                              {log.requiresUtmInput && correspondingProcessedRow && rowIndexInProcessedJson !== -1 && !utmZoneOverrides.has(rowId) && (
-                                <Button variant="outline" size="sm" className="text-xs h-7 px-2" onClick={() => handleUtmModalOpen(correspondingProcessedRow, rowIndexInProcessedJson)}>
-                                  Provide UTM
-                                </Button>
-                              )}
-                              {utmZoneOverrides.has(rowId) && <span className="text-xs text-green-600 flex items-center justify-center"><CheckCircle2 className="w-3 h-3 mr-1"/>UTM Provided</span>}
-                              {log.isError && !log.requiresUtmInput && <span className="text-xs text-destructive flex items-center justify-center"><XCircle className="w-3 h-3 mr-1"/>Error</span>}
+                              {actionButton}
                             </TableCell>
                           </TableRow>
                         );
@@ -834,7 +998,7 @@ export default function DataForgeStudio() {
                             log.status === 'Transformed' ? 'bg-blue-100 text-blue-700' :
                             log.status === 'Filled' ? 'bg-green-100 text-green-700' :
                             log.status === 'Error' ? 'bg-red-100 text-red-700' :
-                            log.status === 'NeedsManualUTMInput' || log.status === 'PendingUTMInput' ? 'bg-amber-100 text-amber-700' :
+                            log.status === 'NeedsManualUTMInput' || log.status === 'PendingUTMInput' || log.status === 'NeedsENAndUTMInput' ? 'bg-amber-100 text-amber-700' :
                             'bg-gray-100 text-gray-700'
                           }`}>
                             {log.status}
@@ -893,16 +1057,72 @@ export default function DataForgeStudio() {
         <TabsContent value="output" className="mt-6">
           <Card className="shadow-lg">
             <CardHeader>
-              <CardTitle className="flex items-center text-xl"><FileJson className="mr-2 h-5 w-5" />Final Output Preview</CardTitle>
-              <CardDescription>Preview your final JSON data (first 10 records in raw format, full data in table view) after merging, transformations, and structure edits.</CardDescription>
+              <CardTitle className="flex items-center text-xl"><FileJson className="mr-2 h-5 w-5" />Final Output Preview & Edit</CardTitle>
+              <CardDescription>Preview your final JSON data. You can edit PSM Station Numbers (or equivalent identifiers) directly in the table before downloading.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               
-              <Tabs defaultValue="raw-json" className="w-full">
+              <Tabs defaultValue="table-view" className="w-full">
                 <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="table-view"><TableIcon className="mr-2 h-4 w-4" />Table View (Editable)</TabsTrigger>
                   <TabsTrigger value="raw-json"><FileJson className="mr-2 h-4 w-4" />Raw JSON (10 Records)</TabsTrigger>
-                  <TabsTrigger value="table-view"><TableIcon className="mr-2 h-4 w-4" />Table View (All Records)</TabsTrigger>
                 </TabsList>
+                
+                <TabsContent value="table-view" className="mt-4">
+                  {finalJsonOutputForPreview && finalJsonOutputForPreview.length > 0 ? (
+                    <ScrollArea className="h-[600px] w-full border rounded-md">
+                      <Table>
+                        <TableHeader className="sticky top-0 bg-background z-10">
+                          <TableRow>
+                            <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><List className="h-4 w-4 inline-block mr-1" />#</TableHead>
+                            {outputTableHeaders.map(header => {
+                              // Determine if this header is the editable identifier
+                              const isEditableIdentifierHeader = processedJson && processedJson.length > 0 && header === processedJson[0].__identifierKey__;
+                              return (
+                                <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">
+                                  {header}
+                                  {isEditableIdentifierHeader && <Edit3 className="h-3 w-3 inline-block ml-1 text-muted-foreground" />}
+                                </TableHead>
+                              );
+                            })}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {finalJsonOutputForPreview.map((row, rowIndex) => {
+                            const originalProcessedRow = processedJson?.find(pRow => pRow.__id__ === (row as ProcessedRow).__id__); // Need original for __id__ and __identifierKey__
+                            const rowId = originalProcessedRow?.__id__;
+                            const identifierKey = originalProcessedRow?.__identifierKey__;
+
+                            return (
+                              <TableRow key={`output-row-${rowIndex}`}>
+                                <TableCell className="text-xs px-2 py-1 font-medium text-muted-foreground">{rowIndex + 1}</TableCell>
+                                {outputTableHeaders.map(header => {
+                                  const isEditableField = rowId && identifierKey && header === identifierKey;
+                                  return (
+                                    <TableCell key={`output-cell-${rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate">
+                                      {isEditableField && rowId ? (
+                                        <Input
+                                          type="text"
+                                          value={editablePsmNumbers[rowId] || String(row[header])}
+                                          onChange={(e) => handlePsmNumberChange(rowId, e.target.value)}
+                                          className="h-7 text-xs p-1"
+                                        />
+                                      ) : (
+                                        String(row[header])
+                                      )}
+                                    </TableCell>
+                                  );
+                                })}
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  ) : (
+                    <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No data to display in table view. Process files or check filters.</p>
+                  )}
+                </TabsContent>
                 <TabsContent value="raw-json" className="mt-4">
                   <ScrollArea className="h-[400px] w-full border rounded-md bg-muted/20">
                     <Textarea
@@ -913,36 +1133,6 @@ export default function DataForgeStudio() {
                         placeholder="JSON output will appear here..."
                     />
                   </ScrollArea>
-                </TabsContent>
-                <TabsContent value="table-view" className="mt-4">
-                  {finalJsonOutputForPreview && finalJsonOutputForPreview.length > 0 ? (
-                    <ScrollArea className="h-[600px] w-full border rounded-md">
-                      <Table>
-                        <TableHeader className="sticky top-0 bg-background z-10">
-                          <TableRow>
-                            <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><List className="h-4 w-4 inline-block mr-1" />#</TableHead>
-                            {outputTableHeaders.map(header => (
-                              <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">{header}</TableHead>
-                            ))}
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {finalJsonOutputForPreview.map((row, rowIndex) => (
-                            <TableRow key={`output-row-${rowIndex}`}>
-                              <TableCell className="text-xs px-2 py-1 font-medium text-muted-foreground">{rowIndex + 1}</TableCell>
-                              {outputTableHeaders.map(header => (
-                                <TableCell key={`output-cell-${rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate" title={String(row[header])}>
-                                  {String(row[header])}
-                                </TableCell>
-                              ))}
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </ScrollArea>
-                  ) : (
-                    <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No data to display in table view. Process files or check filters.</p>
-                  )}
                 </TabsContent>
               </Tabs>
 
@@ -1009,6 +1199,17 @@ export default function DataForgeStudio() {
         />
       )}
 
+      {isIslandUrlModalOpen && currentIslandForUrlInput && (
+        <IslandUrlInputModal
+          isOpen={isIslandUrlModalOpen}
+          onClose={() => setIsIslandUrlModalOpen(false)}
+          onSave={handleIslandUrlSave}
+          islandName={currentIslandForUrlInput}
+          currentUrl={userProvidedIslandUrls[currentIslandForUrlInput] || ''}
+        />
+      )}
+
+
       <footer className="text-center py-6 mt-8 border-t">
         <p className="text-xs text-muted-foreground">
           &copy; {new Date().getFullYear()} DataForge Studio. Powered by Next.js & Genkit.
@@ -1018,12 +1219,12 @@ export default function DataForgeStudio() {
   );
 }
 // Helper to get a display identifier for a row
-function getRowIdentifier(row: JsonObject, rowIndex: number, fileName: string): string {
+function getRowIdentifierDetails(row: JsonObject, rowIndex: number, fileName: string): { identifier: string, keyUsed: string | null } {
   const psmKeys = ["PSM Station Number", "PSM_Station_Number", "PSMNo", "PSM_No", "ID", "psm_id"];
   for (const key of psmKeys) {
     if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
-      return String(row[key]);
+      return { identifier: String(row[key]), keyUsed: key };
     }
   }
-  return `${fileName} Original Row ${rowIndex + 1}`;
+  return { identifier: `${fileName}-Row-${rowIndex + 1}`, keyUsed: null };
 }

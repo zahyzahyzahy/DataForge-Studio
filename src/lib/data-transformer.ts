@@ -1,7 +1,7 @@
 // @ts-ignore
 import proj4 from 'proj4';
 import type { DataRow } from './data-transformer'; // Self-import for type, will be defined below
-import type { TransformationLogEntry, TransformationStatus, UTMZone, ProcessedJsonArray, ProcessedRow, ApplyTransformationsResult } from '@/types/data';
+import type { TransformationLogEntry, TransformationStatus, UTMZone, ProcessedJsonArray, ProcessedRow, ApplyTransformationsResult, IslandToUrlMap } from '@/types/data';
 
 
 // Define common UTM projection strings (add more as needed)
@@ -24,13 +24,13 @@ export type DataRow = Record<string, any>; // Original simple data row type
 const psmNumberKeys = ["PSM Station Number", "PSM_Station_Number", "PSMNo", "PSM_No", "ID", "psm_id"];
 
 
-function getRowIdentifier(row: DataRow, rowIndex: number, fileName: string): string {
+function getRowIdentifierDetails(row: DataRow, rowIndex: number, fileName: string): { identifier: string, keyUsed: string | null } {
   for (const key of psmNumberKeys) {
     if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
-      return String(row[key]);
+      return { identifier: String(row[key]), keyUsed: key };
     }
   }
-  return `${fileName} Original Row ${rowIndex + 1}`;
+  return { identifier: `${fileName} Original Row ${rowIndex + 1}`, keyUsed: null };
 }
 
 
@@ -54,7 +54,7 @@ function createLogEntry(
     status,
     details,
     isError: status === 'Error',
-    requiresUtmInput: status === 'NeedsManualUTMInput' || status === 'PendingUTMInput',
+    requiresUtmInput: status === 'NeedsManualUTMInput' || status === 'PendingUTMInput' || status === 'NeedsENAndUTMInput',
   };
 }
 
@@ -154,17 +154,19 @@ function parseDMStoDD(dmsStr: string | number | null | undefined, fieldName: str
 
 export function applyIntelligentTransformations(
   inputFiles: { fileId: string, fileName: string, data: DataRow[] }[],
-  utmZoneOverrides: Map<string, UTMZone | string> = new Map() // Key: `${fileId}-${originalRowIndex}`, Value: UTMZone object or full proj string
+  utmZoneOverrides: Map<string, UTMZone | string> = new Map(), // Key: `${fileId}-${originalRowIndex}`, Value: UTMZone object or full proj string
+  userProvidedIslandUrls: IslandToUrlMap = {}
 ): ApplyTransformationsResult {
   
   const transformationLog: TransformationLogEntry[] = [];
   const processedDataArray: ProcessedJsonArray = [];
 
-  const islandUrlMap: Record<string, string> = {};
+  const islandUrlMap: IslandToUrlMap = {...userProvidedIslandUrls};
 
   // First pass for URL standardization (if Island and URL columns exist)
   // This helps ensure that if a URL is found for an island, it's consistently used.
-  for (const { fileId, fileName, data } of inputFiles) {
+  // User-provided URLs take precedence.
+  for (const { data } of inputFiles) {
     const headers = data.length > 0 ? Object.keys(data[0]) : [];
     if (headers.includes('Island') && headers.includes('URL')) {
         data.forEach(originalRow => {
@@ -183,7 +185,7 @@ export function applyIntelligentTransformations(
     const headers = data.length > 0 ? Object.keys(data[0]) : [];
 
     data.forEach((originalRow, originalRowIndex) => {
-      const rowIdentifier = getRowIdentifier(originalRow, originalRowIndex, fileName);
+      const { identifier: rowIdentifier, keyUsed: identifierKey } = getRowIdentifierDetails(originalRow, originalRowIndex, fileName);
       const uniqueRowId = `${fileId}-${originalRowIndex}`;
 
       const newRow: ProcessedRow = {
@@ -193,6 +195,7 @@ export function applyIntelligentTransformations(
         __fileId__: fileId,
         __fileName__: fileName,
         __rowIdentifier__: rowIdentifier,
+        __identifierKey__: identifierKey,
       };
 
       // DMS to DD for Lat/Long
@@ -209,34 +212,39 @@ export function applyIntelligentTransformations(
          else if (originalLong === null || String(originalLong).trim() === '' || String(originalLong).trim() === '-') newRow['Long'] = null;
       }
       
-      // UTM to Lat/Lon if Lat/Long are missing/invalid and Easting/Northing exist
-      const latMissing = newRow['Lat'] === null || newRow['Lat'] === undefined || String(newRow['Lat']).trim() === '' || isNaN(Number(newRow['Lat']));
-      const longMissing = newRow['Long'] === null || newRow['Long'] === undefined || String(newRow['Long']).trim() === '' || isNaN(Number(newRow['Long']));
+      // UTM to Lat/Lon if Lat/Long are missing/invalid and Easting/Northing exist or can be provided
+      let latMissing = newRow['Lat'] === null || newRow['Lat'] === undefined || String(newRow['Lat']).trim() === '' || isNaN(Number(newRow['Lat']));
+      let longMissing = newRow['Long'] === null || newRow['Long'] === undefined || String(newRow['Long']).trim() === '' || isNaN(Number(newRow['Long']));
       
       const eastingKey = headers.find(h => h.toLowerCase() === 'easting/m' || h.toLowerCase() === 'easting');
       const northingKey = headers.find(h => h.toLowerCase() === 'northing/m' || h.toLowerCase() === 'northing');
 
-      if ((latMissing || longMissing) && eastingKey && northingKey && newRow[eastingKey] !== undefined && newRow[northingKey] !== undefined) {
-        const easting = parseFloat(String(newRow[eastingKey]).replace(/,/g, ''));
-        const northing = parseFloat(String(newRow[northingKey]).replace(/,/g, ''));
+      const eastingValue = eastingKey ? newRow[eastingKey] : undefined;
+      const northingValue = northingKey ? newRow[northingKey] : undefined;
 
-        if (!isNaN(easting) && !isNaN(northing)) {
+      const eastingPresentAndValid = eastingKey && eastingValue !== undefined && eastingValue !== null && !isNaN(parseFloat(String(eastingValue).replace(/,/g, '')));
+      const northingPresentAndValid = northingKey && northingValue !== undefined && northingValue !== null && !isNaN(parseFloat(String(northingValue).replace(/,/g, '')));
+
+
+      if (latMissing || longMissing) {
+        if (eastingPresentAndValid && northingPresentAndValid) {
+          const easting = parseFloat(String(eastingValue).replace(/,/g, ''));
+          const northing = parseFloat(String(northingValue).replace(/,/g, ''));
+          
           const override = utmZoneOverrides.get(uniqueRowId);
           let sourceProjection: string | null = null;
 
           if (override) {
             if (typeof override === 'string') {
               sourceProjection = override;
-               newRow.__utmZoneProvided__ = "Custom";
+              newRow.__utmZoneProvided__ = "Custom"; // Or parse the string for zone/hemisphere if possible
             } else {
               sourceProjection = utmProjections[`${override.zone}${override.hemisphere}`] || `+proj=utm +zone=${override.zone} +datum=WGS84 +units=m +no_defs +hemisphere=${override.hemisphere}`;
               newRow.__utmZoneProvided__ = `${override.zone}${override.hemisphere}`;
             }
           } else {
-            // Default or prompt logic
-            // For now, if no override, flag for input
-            newRow.__needsUTMInput__ = true;
-            transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `E: ${newRow[eastingKey]}, N: ${newRow[northingKey]}`, null, 'PendingUTMInput', 'Lat/Long missing, Easting/Northing present. UTM zone needed.'));
+            newRow.__needsUTMZoneInput__ = true; // E/N are present, just need zone
+            transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `E: ${eastingValue}, N: ${northingValue}`, null, 'PendingUTMInput', 'Lat/Long missing. Easting/Northing present. UTM zone needed.'));
           }
           
           if (sourceProjection) {
@@ -245,30 +253,31 @@ export function applyIntelligentTransformations(
               if (latMissing) {
                 newRow['Lat'] = coords.lat;
                 transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat', originalRow['Lat'] ?? null, coords.lat, 'Filled', `From UTM E/N (Zone: ${newRow.__utmZoneProvided__ || 'User-Provided'})`));
+                latMissing = false; // Update status
               }
               if (longMissing) {
                 newRow['Long'] = coords.lon;
                 transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Long', originalRow['Long'] ?? null, coords.lon, 'Filled', `From UTM E/N (Zone: ${newRow.__utmZoneProvided__ || 'User-Provided'})`));
+                longMissing = false; // Update status
               }
-              newRow.__needsUTMInput__ = false; // UTM successfully used
+              newRow.__needsUTMZoneInput__ = false; 
+              newRow.__needsENAndUTMInput__ = false;
             } else {
-                 transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `E: ${newRow[eastingKey]}, N: ${newRow[northingKey]}`, null, 'Error', `UTM to Lat/Lon conversion failed with zone ${newRow.__utmZoneProvided__ || 'User-Provided'}.`));
-                 newRow.__needsUTMInput__ = true; // Still needs input if conversion failed
+                 transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `E: ${eastingValue}, N: ${northingValue}`, null, 'Error', `UTM to Lat/Lon conversion failed with zone ${newRow.__utmZoneProvided__ || 'User-Provided'}.`));
+                 newRow.__needsUTMZoneInput__ = !override; // Still needs input if conversion failed AND no override was attempted
+                 newRow.__needsENAndUTMInput__ = false; // E/N were present, issue is zone/conversion
             }
           }
-        } else {
-           transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `E: ${newRow[eastingKey]}, N: ${newRow[northingKey]}`, null, 'Error', 'Easting/Northing are not valid numbers.'));
+        } else { // Lat/Long missing AND Easting/Northing are missing or invalid
+            newRow.__needsENAndUTMInput__ = true;
+            transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `Lat: ${newRow['Lat']}, Long: ${newRow['Long']}, E: ${eastingValue}, N: ${northingValue}`, null, 'NeedsENAndUTMInput', 'Lat/Long missing and Easting/Northing missing or invalid. Requires E/N values and UTM zone.'));
         }
-      } else if ((latMissing || longMissing) && (!eastingKey || newRow[eastingKey] === undefined || !northingKey || newRow[northingKey] === undefined)) {
-        // Lat/Long missing AND Easting/Northing missing or not valid
-        newRow.__needsUTMInput__ = true; // Potentially, if user *could* provide E/N and zone
-        transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'Lat, Long', `Lat: ${newRow['Lat']}, Long: ${newRow['Long']}`, null, 'NeedsManualUTMInput', 'Lat/Long and Easting/Northing are missing or invalid. Requires UTM zone and E/N values for conversion.'));
       }
 
 
-      // URL Standardization
+      // URL Standardization (takes into account userProvidedIslandUrls via islandUrlMap initialization)
       if (headers.includes('Island') && headers.includes('URL')) {
-        const islandKey = 'Island'; // Assuming 'Island' is the column name
+        const islandKey = 'Island';
         const island = newRow[islandKey] ? String(newRow[islandKey]).trim() : null;
         const originalUrl = newRow['URL'];
 
@@ -277,40 +286,37 @@ export function applyIntelligentTransformations(
             newRow['URL'] = islandUrlMap[island];
             transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, newRow['URL'], 'Filled', `Standardized by Island '${island}'`));
           } else {
-            transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'Unchanged', `No standard URL found for Island '${island}' and URL is missing.`));
+            // URL still missing after initial pass and user inputs
+            transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'NeedsManualUTMInput', `URL missing for Island '${island}'. User input may be required.`));
+            // Note: 'NeedsManualUTMInput' is a bit of a misnomer here, but it flags for user attention. Could create a 'NeedsURLInput' status.
+            // For now, it groups with other manual input needs.
+            newRow.__requiresURLInputForIsland__ = island; // Custom flag for UI
           }
         } else if (island && originalUrl && islandUrlMap[island] && String(originalUrl).trim() !== islandUrlMap[island]) {
-            // Optionally, log if an existing URL differs from the standard one, but don't change it automatically
-            // transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'Unchanged', `Existing URL differs from standard for Island '${island}'. Kept original.`));
+            // Log if an existing URL differs, but typically don't overwrite if user provided it or it was there initially.
+            // transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'Unchanged', `Existing URL for Island '${island}' differs from a potentially found standard. Kept original.`));
         } else if (originalUrl) {
-             transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'Unchanged', 'URL present or island missing.'));
+             transformationLog.push(createLogEntry(fileId, originalRowIndex, rowIdentifier, 'URL', originalUrl, originalUrl, 'Unchanged', 'URL present or island missing/no standard found.'));
         }
       }
       
-      // Add log entries for unchanged fields for completeness in validation table if desired.
-      // This can be extensive, so enable cautiously or make it optional.
-      // For now, focusing on changed/error fields.
-
       processedDataArray.push(newRow);
     });
   }
   
-  // Ensure all fields from original data are in the log for rows that had any transformation or error
   const finalLog: TransformationLogEntry[] = [];
   const loggedEntries = new Set<string>(); // `${fileId}-${originalRowIndex}-${field}`
 
   transformationLog.forEach(log => {
     finalLog.push(log);
-    loggedEntries.add(`${log.fileId}-${log.originalRowIndex}-${log.field}`);
-     // If Lat, Long was logged as one entry, mark both fields
-    if (log.field === 'Lat, Long') {
+    const key = `${log.fileId}-${log.originalRowIndex}-${log.field}`;
+    loggedEntries.add(key);
+    if (log.field === 'Lat, Long') { // If a combined log entry was made
         loggedEntries.add(`${log.fileId}-${log.originalRowIndex}-Lat`);
         loggedEntries.add(`${log.fileId}-${log.originalRowIndex}-Long`);
     }
   });
   
-  // Add "Unchanged" log entries for fields that were not explicitly transformed or errored
-  // but are part of rows that had other changes, to provide a full picture for validation.
   processedDataArray.forEach(processedRow => {
     const originalFile = inputFiles.find(f => f.fileId === processedRow.__fileId__);
     if (!originalFile) return;
@@ -319,37 +325,29 @@ export function applyIntelligentTransformations(
 
     Object.keys(originalDataRow).forEach(fieldKey => {
       if (!loggedEntries.has(`${processedRow.__fileId__}-${processedRow.__originalRowIndex__}-${fieldKey}`)) {
-        // Check if the value actually changed (e.g. type coercion by PapaParse)
-        // This comparison can be tricky due to types (e.g. "5" vs 5)
         const originalVal = originalDataRow[fieldKey];
         const processedVal = processedRow[fieldKey];
         let status: TransformationStatus = 'Unchanged';
-        let details = 'No transformation applied or value remained effectively same.';
-
-         // UTM Conversion: New Lat/Long values after UTM transformation should be included
-        if ((fieldKey === 'Lat' || fieldKey === 'Long') && processedRow.__utmZoneProvided__) {
-            status = 'Filled'; // UTM to Lat/Long
-            details = `From UTM E/N (Zone: ${processedRow.__utmZoneProvided__ || 'User-Provided'})`;
-        }
+        let details = 'No explicit transformation applied. Value may have been type-coerced on load.';
         
-        // Basic check for type changes for numeric-like strings
-        else if (typeof originalVal === 'string' && typeof processedVal === 'number' && parseFloat(originalVal) === processedVal) {
-            status = 'Transformed'; // Or 'Coerced'
-            details = 'Type coerced from string to number during initial parse.';
-        } else if (originalVal !== processedVal && !(Number.isNaN(originalVal) && Number.isNaN(processedVal))) {
-            // If they are different and not both NaN, it might indicate an implicit change.
-            // This could be noisy, so refine if necessary.
-            // For now, let's stick to 'Unchanged' unless explicitly handled.
+        // Check for type coercion during initial CSV parse
+        if (typeof originalVal === 'string' && typeof processedVal === 'number' && String(parseFloat(originalVal)) === String(processedVal)) {
+            status = 'Transformed'; 
+            details = 'Type coerced from string to number during initial CSV parse.';
+        } else if (originalVal !== processedVal && !(Number.isNaN(originalVal) && Number.isNaN(processedVal)) && !(originalVal === null && processedVal === undefined) && !(originalVal === undefined && processedVal === null) ) {
+           // This case means the value changed by some means not directly logged yet.
+           // For example, if an empty string became null due to dynamicTyping.
+           // For more precise logging, Papaparse's dynamicTyping effects might need to be logged earlier or inferred.
+           // Keeping as 'Unchanged' with generic detail to avoid over-logging minor parsing nuances as 'Transformed'.
         }
-
 
         finalLog.push(createLogEntry(
           processedRow.__fileId__,
           processedRow.__originalRowIndex__,
           processedRow.__rowIdentifier__,
           fieldKey,
-          originalDataRow[fieldKey],
-          processedRow[fieldKey],
+          originalVal, // Use originalDataRow[fieldKey] for original value
+          processedVal, // Use processedRow[fieldKey] for transformed value
           status,
           details
         ));
@@ -360,7 +358,7 @@ export function applyIntelligentTransformations(
 
   return {
     transformedData: processedDataArray,
-    transformationLog: finalLog.sort((a,b) => { // Sort for consistent display
+    transformationLog: finalLog.sort((a,b) => { 
         if(a.fileId !== b.fileId) return a.fileId.localeCompare(b.fileId);
         if(a.originalRowIndex !== b.originalRowIndex) return a.originalRowIndex - b.originalRowIndex;
         return a.field.localeCompare(b.field);

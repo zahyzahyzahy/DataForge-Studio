@@ -21,12 +21,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { RowForUTMInput, UTMZone } from '@/types/data';
+import type { RowForUTMInput, UTMZone, UTMModalInputData } from '@/types/data';
 
 interface UTMInputModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (utmZone: UTMZone | string) => void; // Can be UTMZone object or full proj string
+  onSave: (data: UTMModalInputData) => void;
   rowData: RowForUTMInput | null;
   commonUtmZones: { value: string; label: string; zone: number; hemisphere: 'N' | 'S' }[];
 }
@@ -36,76 +36,131 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData, common
   const [selectedZoneValue, setSelectedZoneValue] = useState<string>(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || ''); 
   const [customProjString, setCustomProjString] = useState<string>('');
   const [inputType, setInputType] = useState<'dropdown' | 'manual'>('dropdown');
+  const [easting, setEasting] = useState<string>('');
+  const [northing, setNorthing] = useState<string>('');
+
+  const requiresENInput = rowData?.requiresENInput || false;
 
   useEffect(() => {
-    if (isOpen) {
-      const providedZone = rowData?.row.__utmZoneProvided__;
+    if (isOpen && rowData) {
+      const providedZone = rowData.row.__utmZoneProvided__;
+      // Reset fields based on rowData
+      setEasting(requiresENInput ? String(rowData.row[Object.keys(rowData.row).find(k => k.toLowerCase() === 'easting/m' || k.toLowerCase() === 'easting') || ''] || '') : '');
+      setNorthing(requiresENInput ? String(rowData.row[Object.keys(rowData.row).find(k => k.toLowerCase() === 'northing/m' || k.toLowerCase() === 'northing') || ''] || '') : '');
+
+
       if (providedZone && commonUtmZones.some(z => z.value === providedZone)) {
         setSelectedZoneValue(providedZone);
         setInputType('dropdown');
         setCustomProjString('');
-      } else if (providedZone && typeof providedZone === 'string' && (providedZone.startsWith('+proj=') || providedZone.toUpperCase().startsWith('EPSG:'))) { // It might be a custom string
+      } else if (providedZone && typeof providedZone === 'string' && (providedZone.startsWith('+proj=') || providedZone.toUpperCase().startsWith('EPSG:'))) {
         setCustomProjString(providedZone);
         setInputType('manual');
         setSelectedZoneValue(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || '');
-      } else { // No zone provided yet, set to default
+      } else { 
         setSelectedZoneValue(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || '');
         setCustomProjString('');
         setInputType('dropdown');
       }
+    } else if (!isOpen) {
+      // Reset when closed
+      setEasting('');
+      setNorthing('');
     }
-  }, [isOpen, rowData, commonUtmZones]);
+  }, [isOpen, rowData, commonUtmZones, requiresENInput]);
 
   const handleSave = () => {
+    let utmInputResult: UTMZone | string;
+
     if (inputType === 'dropdown') {
       const selected = commonUtmZones.find(z => z.value === selectedZoneValue);
       if (selected) {
-        onSave({ zone: selected.zone, hemisphere: selected.hemisphere });
+        utmInputResult = { zone: selected.zone, hemisphere: selected.hemisphere };
       } else {
-         // Fallback or error, this shouldn't happen if selectedZoneValue is valid and commonUtmZones is populated
         const defaultZone = commonUtmZones.find(z => z.label.includes("Default")) || commonUtmZones[0];
         if (defaultZone) {
-            onSave({zone: defaultZone.zone, hemisphere: defaultZone.hemisphere});
+            utmInputResult = {zone: defaultZone.zone, hemisphere: defaultZone.hemisphere};
         } else {
-            // Highly unlikely, but as a last resort:
             alert("Error: No UTM zones available for selection.");
             return;
         }
       }
     } else { // manual input
       if (customProjString.trim()) {
-        onSave(customProjString.trim());
+        utmInputResult = customProjString.trim();
       } else {
         alert("Custom projection string cannot be empty.");
         return;
       }
+    }
+
+    if (requiresENInput) {
+        if (!easting.trim() || !northing.trim() || isNaN(parseFloat(easting)) || isNaN(parseFloat(northing))) {
+            alert("Easting and Northing must be provided as valid numbers.");
+            return;
+        }
+         onSave({ utmInput: utmInputResult, easting: easting.trim(), northing: northing.trim() });
+    } else {
+        onSave({ utmInput: utmInputResult });
     }
     onClose();
   };
 
   if (!rowData) return null;
 
-  const eastingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'easting/m' || h.toLowerCase() === 'easting');
-  const northingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'northing/m' || h.toLowerCase() === 'northing');
+  const currentEastingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'easting/m' || h.toLowerCase() === 'easting');
+  const currentNorthingKey = Object.keys(rowData.row).find(h => h.toLowerCase() === 'northing/m' || h.toLowerCase() === 'northing');
 
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-[525px]">
         <DialogHeader>
-          <DialogTitle>Provide UTM Zone Information</DialogTitle>
+          <DialogTitle>Provide UTM Information</DialogTitle>
           <DialogDescription>
             For row: <strong>{rowData.row.__rowIdentifier__}</strong> (File: {rowData.row.__fileName__}, Original Index: {rowData.row.__originalRowIndex__ + 1})
             <br />
-            Easting: {eastingKey ? rowData.row[eastingKey] : 'N/A'}, Northing: {northingKey ? rowData.row[northingKey] : 'N/A'}
-            <br />
-            Latitude and Longitude are missing or invalid. Please provide the UTM zone for conversion.
+            {!requiresENInput && (
+                <>Easting: {currentEastingKey ? rowData.row[currentEastingKey] : 'N/A'}, Northing: {currentNorthingKey ? rowData.row[currentNorthingKey] : 'N/A'}<br/></>
+            )}
+            {requiresENInput ? "Easting, Northing, and UTM Zone are required." : "Latitude and Longitude are missing or invalid. Please provide the UTM zone for conversion."}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
+         {requiresENInput && (
+            <>
+              <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="easting" className="text-right col-span-1">
+                  Easting
+                </Label>
+                <Input
+                  id="easting"
+                  value={easting}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setEasting(e.target.value)}
+                  className="col-span-3"
+                  placeholder="Enter Easting value"
+                  type="number"
+                />
+              </div>
+              <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="northing" className="text-right col-span-1">
+                  Northing
+                </Label>
+                <Input
+                  id="northing"
+                  value={northing}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setNorthing(e.target.value)}
+                  className="col-span-3"
+                  placeholder="Enter Northing value"
+                  type="number"
+                />
+              </div>
+            </>
+          )}
+
           <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="inputType" className="text-right col-span-1">
-              Input Method
+              UTM Zone Method
             </Label>
             <Select value={inputType} onValueChange={(v) => setInputType(v as 'dropdown' | 'manual')} >
               <SelectTrigger className="col-span-3">

@@ -12,8 +12,9 @@ export type TransformationStatus =
   | 'Filled' 
   | 'Error' 
   | 'Unchanged' 
-  | 'NeedsManualUTMInput'
-  | 'PendingUTMInput';
+  | 'NeedsManualUTMInput' // General case, could be just zone, or E/N + zone
+  | 'PendingUTMInput' // Specifically UTM Zone is needed, E/N are presumed present
+  | 'NeedsENAndUTMInput'; // Specifically Easting, Northing, and UTM Zone are needed
 
 export interface TransformationLogEntry {
   fileId: string;
@@ -25,7 +26,7 @@ export interface TransformationLogEntry {
   status: TransformationStatus;
   details: string;
   isError: boolean; // Simplified flag for quick filtering
-  requiresUtmInput?: boolean; // True if this specific log entry is about needing UTM
+  requiresUtmInput?: boolean; // True if this specific log entry is about needing UTM (zone, or E/N + zone)
   utmProvided?: boolean; // True if UTM has been provided for this row
 }
 
@@ -41,8 +42,10 @@ export interface ProcessedRow extends JsonObject {
   __fileName__: string;
   __rowIdentifier__: string; // Display identifier (PSM No. or "FileX Original Row Y")
   __isDeselected__?: boolean;
-  __needsUTMInput__?: boolean;
-  __utmZoneProvided__?: string; // e.g. "43N"
+  __needsUTMZoneInput__?: boolean; // Specifically needs UTM zone, E/N assumed present or not relevant
+  __needsENAndUTMInput__?: boolean; // Needs Easting, Northing, and UTM zone
+  __utmZoneProvided__?: string; // e.g. "43N" or custom proj string
+  __identifierKey__?: string | null; // The key used as the primary identifier (e.g., "PSM Station Number")
 }
 
 export type ProcessedJsonArray = ProcessedRow[];
@@ -53,12 +56,24 @@ export interface UTMZone {
   hemisphere: 'N' | 'S';
 }
 
+export interface UTMModalInputData {
+  utmInput: UTMZone | string; // UTMZone object or full proj string
+  easting?: string;
+  northing?: string;
+}
+
 export interface RowForUTMInput {
   row: ProcessedRow;
-   rowIndexInProcessedJson: number; // index in the currently displayed processedJson
+  rowIndexInProcessedJson: number; // index in the currently displayed processedJson
+  // Add a mode to distinguish if E/N fields are also required by the modal
+  requiresENInput?: boolean; 
 }
 
 export interface ApplyTransformationsResult {
   transformedData: ProcessedJsonArray;
   transformationLog: TransformationLogEntry[];
+}
+
+export interface IslandToUrlMap {
+  [islandName: string]: string;
 }
