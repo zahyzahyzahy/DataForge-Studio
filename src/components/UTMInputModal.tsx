@@ -28,42 +28,33 @@ interface UTMInputModalProps {
   onClose: () => void;
   onSave: (utmZone: UTMZone | string) => void; // Can be UTMZone object or full proj string
   rowData: RowForUTMInput | null;
+  commonUtmZones: { value: string; label: string; zone: number; hemisphere: 'N' | 'S' }[];
 }
 
-// Common UTM zones for Maldives and surrounding areas as an example
-// Users might need a more comprehensive list or search capability for global use
-const commonUtmZones: { value: string; label: string; zone: number; hemisphere: 'N' | 'S' }[] = [
-  { value: '42N', label: 'UTM Zone 42N', zone: 42, hemisphere: 'N' },
-  { value: '43N', label: 'UTM Zone 43N (Default for Maldives)', zone: 43, hemisphere: 'N' },
-  { value: '44N', label: 'UTM Zone 44N', zone: 44, hemisphere: 'N' },
-  { value: '42S', label: 'UTM Zone 42S', zone: 42, hemisphere: 'S' },
-  { value: '43S', label: 'UTM Zone 43S', zone: 43, hemisphere: 'S' },
-  { value: '44S', label: 'UTM Zone 44S', zone: 44, hemisphere: 'S' },
-  // Add more zones as needed
-];
 
-export default function UTMInputModal({ isOpen, onClose, onSave, rowData }: UTMInputModalProps) {
-  const [selectedZoneValue, setSelectedZoneValue] = useState<string>('43N'); // Default to 43N
+export default function UTMInputModal({ isOpen, onClose, onSave, rowData, commonUtmZones }: UTMInputModalProps) {
+  const [selectedZoneValue, setSelectedZoneValue] = useState<string>(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || ''); 
   const [customProjString, setCustomProjString] = useState<string>('');
   const [inputType, setInputType] = useState<'dropdown' | 'manual'>('dropdown');
 
   useEffect(() => {
     if (isOpen) {
-      // Reset to default when modal opens, or try to infer from existing data if available
       const providedZone = rowData?.row.__utmZoneProvided__;
       if (providedZone && commonUtmZones.some(z => z.value === providedZone)) {
         setSelectedZoneValue(providedZone);
         setInputType('dropdown');
-      } else if (providedZone) { // It might be a custom string
+        setCustomProjString('');
+      } else if (providedZone && typeof providedZone === 'string' && (providedZone.startsWith('+proj=') || providedZone.toUpperCase().startsWith('EPSG:'))) { // It might be a custom string
         setCustomProjString(providedZone);
         setInputType('manual');
-      } else {
-        setSelectedZoneValue('43N');
+        setSelectedZoneValue(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || '');
+      } else { // No zone provided yet, set to default
+        setSelectedZoneValue(commonUtmZones.find(z => z.label.includes("Default"))?.value || commonUtmZones[0]?.value || '');
         setCustomProjString('');
         setInputType('dropdown');
       }
     }
-  }, [isOpen, rowData]);
+  }, [isOpen, rowData, commonUtmZones]);
 
   const handleSave = () => {
     if (inputType === 'dropdown') {
@@ -71,14 +62,20 @@ export default function UTMInputModal({ isOpen, onClose, onSave, rowData }: UTMI
       if (selected) {
         onSave({ zone: selected.zone, hemisphere: selected.hemisphere });
       } else {
-        // Fallback or error, though this shouldn't happen if selectedZoneValue is valid
-        onSave('43N'); // Default
+         // Fallback or error, this shouldn't happen if selectedZoneValue is valid and commonUtmZones is populated
+        const defaultZone = commonUtmZones.find(z => z.label.includes("Default")) || commonUtmZones[0];
+        if (defaultZone) {
+            onSave({zone: defaultZone.zone, hemisphere: defaultZone.hemisphere});
+        } else {
+            // Highly unlikely, but as a last resort:
+            alert("Error: No UTM zones available for selection.");
+            return;
+        }
       }
-    } else {
+    } else { // manual input
       if (customProjString.trim()) {
         onSave(customProjString.trim());
       } else {
-        // Handle error: custom string is empty
         alert("Custom projection string cannot be empty.");
         return;
       }

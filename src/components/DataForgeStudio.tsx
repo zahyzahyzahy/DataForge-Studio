@@ -7,11 +7,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { parseCsvToJson } from '@/lib/csv-parser';
-import { applyIntelligentTransformations, getRelevantTransformationColumns } from '@/lib/data-transformer';
+import { applyIntelligentTransformations } from '@/lib/data-transformer';
 import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ListX, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -20,6 +20,14 @@ import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Table,
   TableBody,
@@ -48,6 +56,17 @@ type SortConfig<T> = {
   key: keyof T;
   direction: 'ascending' | 'descending';
 } | null;
+
+// Common UTM zones, can be moved to a shared constants file later
+const commonUtmZones: { value: string; label: string; zone: number; hemisphere: 'N' | 'S' }[] = [
+  { value: '42N', label: 'UTM Zone 42N', zone: 42, hemisphere: 'N' },
+  { value: '43N', label: 'UTM Zone 43N (Default for Maldives)', zone: 43, hemisphere: 'N' },
+  { value: '44N', label: 'UTM Zone 44N', zone: 44, hemisphere: 'N' },
+  { value: '42S', label: 'UTM Zone 42S', zone: 42, hemisphere: 'S' },
+  { value: '43S', label: 'UTM Zone 43S', zone: 43, hemisphere: 'S' },
+  { value: '44S', label: 'UTM Zone 44S', zone: 44, hemisphere: 'S' },
+  // Add more zones as needed
+];
 
 
 export default function DataForgeStudio() {
@@ -78,6 +97,13 @@ export default function DataForgeStudio() {
   const [issueSortConfig, setIssueSortConfig] = useState<SortConfig<TransformationLogEntry>>({ key: 'originalRowIndex', direction: 'ascending'});
   const [validationSortConfig, setValidationSortConfig] = useState<SortConfig<TransformationLogEntry>>({ key: 'originalRowIndex', direction: 'ascending'});
 
+  // State for bulk UTM application
+  const [selectedFileIdForBulkUtm, setSelectedFileIdForBulkUtm] = useState<string | null>(null);
+  const [bulkUtmZone, setBulkUtmZone] = useState<UTMZone | string | null>(null);
+  const [bulkUtmInputType, setBulkUtmInputType] = useState<'dropdown' | 'manual'>('dropdown');
+  const [bulkSelectedZoneValue, setBulkSelectedZoneValue] = useState<string>('43N'); // Default for dropdown
+  const [bulkCustomProjString, setBulkCustomProjString] = useState<string>(''); // For manual input
+
 
   const resetStateForNewUpload = () => {
     setUploadedFilesData([]);
@@ -92,6 +118,12 @@ export default function DataForgeStudio() {
     setUtmZoneOverrides(new Map());
     setActiveMainTab('upload');
     setProgress(0);
+    // Reset bulk UTM state
+    setSelectedFileIdForBulkUtm(null);
+    setBulkUtmZone(null);
+    setBulkUtmInputType('dropdown');
+    setBulkSelectedZoneValue('43N');
+    setBulkCustomProjString('');
   };
 
   const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -180,14 +212,13 @@ export default function DataForgeStudio() {
     const mappedInput = filesToProcess.map(f => ({
       fileId: f.id,
       fileName: f.fileName,
-      data: f.data as JsonObject[] // Assuming data is JsonArray by this point
+      data: f.data as JsonObject[] 
     }));
 
     let transformationResult: ApplyTransformationsResult;
     if (applyTransforms) {
       transformationResult = applyIntelligentTransformations(mappedInput, currentUtmOverrides);
     } else {
-      // If not applying smart transforms, just map to ProcessedRow structure without transformation logic
       const basicProcessedData: ProcessedJsonArray = [];
       const basicLog: TransformationLogEntry[] = [];
       mappedInput.forEach(file => {
@@ -234,11 +265,10 @@ export default function DataForgeStudio() {
     setProgress(100);
     setIsLoading(false);
 
-    // Check if any rows still need UTM input after processing
-    const needsInput = transformationResult.transformedData.some(row => row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__));
+    const needsInput = transformationResult.transformedData.some(row => row.__needsUTMInput__ && !currentUtmOverrides.has(row.__id__));
     if (needsInput) {
-      setActiveMainTab('issues'); // Stay or go to issues tab
-      toast({ title: "Action Required", description: "Some rows require UTM zone input for complete transformation. Please check the 'Issues & UTM' tab.", variant: "default", duration: 5000});
+      setActiveMainTab('issues'); 
+      toast({ title: "Action Required", description: "Some rows require UTM zone input. Check the 'Issues & UTM' tab.", variant: "default", duration: 5000});
     }
 
   }, [toast]);
@@ -257,12 +287,69 @@ export default function DataForgeStudio() {
     setUtmZoneOverrides(updatedOverrides);
     setIsUtmModalOpen(false);
     
-    // Re-process files with the new override
     if (uploadedFilesData.length > 0) {
       toast({title: "Re-processing", description: "Applying new UTM information...", variant: "default"});
       await processAndTransformFiles(uploadedFilesData, applySmartTransforms, updatedOverrides);
     }
   };
+
+  // Update bulkUtmZone based on UI selections for bulk apply
+  useEffect(() => {
+    if (bulkUtmInputType === 'dropdown') {
+      const selected = commonUtmZones.find(z => z.value === bulkSelectedZoneValue);
+      if (selected) {
+        setBulkUtmZone({ zone: selected.zone, hemisphere: selected.hemisphere });
+      } else {
+        setBulkUtmZone(null); // Or a default if preferred
+      }
+    } else { // manual input
+      if (bulkCustomProjString.trim()) {
+        setBulkUtmZone(bulkCustomProjString.trim());
+      } else {
+        setBulkUtmZone(null); // Clear if custom string is empty
+      }
+    }
+  }, [bulkUtmInputType, bulkSelectedZoneValue, bulkCustomProjString]);
+
+  const handleBulkApplyUtmToFile = async () => {
+    if (!selectedFileIdForBulkUtm) {
+      toast({ title: "Select File", description: "Please select a file to apply the UTM zone.", variant: "destructive" });
+      return;
+    }
+    if (!bulkUtmZone) {
+       toast({ title: "Specify Zone", description: "Please specify a UTM zone or Proj4 string.", variant: "destructive" });
+      return;
+    }
+  
+    const newOverrides = new Map(utmZoneOverrides);
+    let changesMade = 0;
+  
+    processedJson?.forEach(row => {
+      if (row.__fileId__ === selectedFileIdForBulkUtm && row.__needsUTMInput__) {
+        // Check if override already exists and is different, or just apply if needed
+        // For simplicity, this will apply/overwrite for any row needing input in the selected file
+        newOverrides.set(row.__id__, bulkUtmZone);
+        changesMade++;
+      }
+    });
+  
+    if (changesMade === 0) {
+      toast({ title: "No Rows Affected", description: `No rows in the selected file required UTM input update with this zone.`, variant: "default" });
+      return;
+    }
+  
+    setUtmZoneOverrides(newOverrides);
+    
+    const fileName = uploadedFilesData.find(f => f.id === selectedFileIdForBulkUtm)?.fileName || 'the selected file';
+    toast({ 
+      title: "Bulk UTM Applied", 
+      description: `UTM zone applied to ${changesMade} row(s) in ${fileName}. Re-processing...`, 
+      variant: "default" 
+    });
+  
+    await processAndTransformFiles(uploadedFilesData, applySmartTransforms, newOverrides);
+  };
+
 
   const handleKeyOrderChange = (keyName: string, direction: 'up' | 'down') => {
     setKeyOrderConfig(prev => {
@@ -313,7 +400,7 @@ export default function DataForgeStudio() {
       return acc;
     }, {} as Record<string, boolean>);
 
-    return restructureJsonArray(filteredData, orderedKeys, includedKeysMap, true); // true to strip __ internal keys
+    return restructureJsonArray(filteredData, orderedKeys, includedKeysMap, true); 
   }, [processedJson, keyOrderConfig, rowsDeselected]);
 
 
@@ -372,6 +459,17 @@ export default function DataForgeStudio() {
     }, [] as RowForUTMInput[]);
   }, [processedJson, utmZoneOverrides]);
 
+  const filesWithPendingUtmInput = useMemo(() => {
+    if (!processedJson) return [];
+    const fileIdsRequiringInput = new Set<string>();
+    processedJson.forEach(row => {
+      if (row.__needsUTMInput__ && !utmZoneOverrides.has(row.__id__)) {
+        fileIdsRequiringInput.add(row.__fileId__);
+      }
+    });
+    return uploadedFilesData.filter(file => fileIdsRequiringInput.has(file.id));
+  }, [processedJson, utmZoneOverrides, uploadedFilesData]);
+
 
   const requestSort = <T, >(key: keyof T, currentSortConfig: SortConfig<T>, setSortConfig: React.Dispatch<React.SetStateAction<SortConfig<T>>>) => {
     let direction: 'ascending' | 'descending' = 'ascending';
@@ -384,10 +482,14 @@ export default function DataForgeStudio() {
   const sortedErrorLog = useMemo(() => {
     if (!issueSortConfig) return errorLogEntries;
     return [...errorLogEntries].sort((a, b) => {
-      if (a[issueSortConfig.key] < b[issueSortConfig.key]) {
+      const valA = a[issueSortConfig.key!];
+      const valB = b[issueSortConfig.key!];
+      if (valA === undefined || valA === null) return 1; // Put undefined/null values at the end
+      if (valB === undefined || valB === null) return -1;
+      if (valA < valB) {
         return issueSortConfig.direction === 'ascending' ? -1 : 1;
       }
-      if (a[issueSortConfig.key] > b[issueSortConfig.key]) {
+      if (valA > valB) {
         return issueSortConfig.direction === 'ascending' ? 1 : -1;
       }
       return 0;
@@ -397,10 +499,14 @@ export default function DataForgeStudio() {
   const sortedValidationLog = useMemo(() => {
     if (!validationSortConfig) return transformationLog;
     return [...transformationLog].sort((a, b) => {
-      if (a[validationSortConfig.key] < b[validationSortConfig.key]) {
+      const valA = a[validationSortConfig.key!];
+      const valB = b[validationSortConfig.key!];
+      if (valA === undefined || valA === null) return 1;
+      if (valB === undefined || valB === null) return -1;
+      if (valA < valB) {
         return validationSortConfig.direction === 'ascending' ? -1 : 1;
       }
-      if (a[validationSortConfig.key] > b[validationSortConfig.key]) {
+      if (valA > valB) {
         return validationSortConfig.direction === 'ascending' ? 1 : -1;
       }
       return 0;
@@ -409,7 +515,7 @@ export default function DataForgeStudio() {
 
   const getSortIndicator = <T, >(key: keyof T, currentSortConfig: SortConfig<T>) => {
     if (!currentSortConfig || currentSortConfig.key !== key) {
-      return <ArrowUpDown className="ml-2 h-3 w-3 opacity-30" />;
+      return <ArrowUpDown className="ml-1 h-3 w-3 opacity-30" />;
     }
     return currentSortConfig.direction === 'ascending' ? '↑' : '↓';
   };
@@ -505,7 +611,7 @@ export default function DataForgeStudio() {
            <Card className="shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center text-xl"><FileWarning className="mr-2 h-5 w-5 text-amber-500" />Transformation Issues & UTM Input</CardTitle>
-              <CardDescription>Review transformation errors, rows requiring UTM zone input, and manage problematic data.</CardDescription>
+              <CardDescription>Review transformation errors, rows requiring UTM zone input, and manage problematic data. You can also apply a UTM zone to all applicable rows in a single file.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               {rowsNeedingUtmInput.length > 0 && (
@@ -513,11 +619,77 @@ export default function DataForgeStudio() {
                   <AlertTriangle className="h-5 w-5 text-amber-500" />
                   <AlertTitle className="font-semibold text-amber-600">UTM Zone Input Required</AlertTitle>
                   <AlertDescription>
-                    {rowsNeedingUtmInput.length} row(s) need UTM zone information to convert Easting/Northing to Lat/Long.
-                    Click 'Provide UTM' next to each item in the table below.
+                    {rowsNeedingUtmInput.length} row(s) need UTM zone information. Use the 'Provide UTM' button for individual rows below, or use the 'Bulk Apply UTM Zone' section.
                   </AlertDescription>
                 </Alert>
               )}
+
+              {filesWithPendingUtmInput.length > 0 && (
+                <div className="p-4 border rounded-md space-y-4 bg-muted/10">
+                  <h3 className="font-semibold text-md flex items-center"><FileCog className="mr-2 h-5 w-5 text-primary" />Bulk Apply UTM Zone to a File</h3>
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                    <div>
+                        <Label htmlFor="bulk-utm-file-select" className="text-xs">Select File</Label>
+                        <Select
+                        value={selectedFileIdForBulkUtm || ""}
+                        onValueChange={setSelectedFileIdForBulkUtm}
+                        disabled={isLoading}
+                        >
+                        <SelectTrigger id="bulk-utm-file-select">
+                            <SelectValue placeholder="Select a file..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {filesWithPendingUtmInput.map(file => (
+                            <SelectItem key={file.id} value={file.id}>{file.fileName}</SelectItem>
+                            ))}
+                        </SelectContent>
+                        </Select>
+                    </div>
+                    <div>
+                        <Label htmlFor="bulk-utm-type" className="text-xs">UTM Input Method</Label>
+                        <Select value={bulkUtmInputType} onValueChange={(v) => setBulkUtmInputType(v as 'dropdown' | 'manual')}>
+                        <SelectTrigger id="bulk-utm-type"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="dropdown">Select from list</SelectItem>
+                            <SelectItem value="manual">Enter custom Proj4 string</SelectItem>
+                        </SelectContent>
+                        </Select>
+                    </div>
+                   </div>
+
+                  {bulkUtmInputType === 'dropdown' && (
+                    <div>
+                      <Label htmlFor="bulk-utm-zone-dropdown" className="text-xs">UTM Zone</Label>
+                      <Select value={bulkSelectedZoneValue} onValueChange={setBulkSelectedZoneValue}>
+                        <SelectTrigger id="bulk-utm-zone-dropdown"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {commonUtmZones.map((zone) => (
+                            <SelectItem key={zone.value} value={zone.value}>{zone.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {bulkUtmInputType === 'manual' && (
+                    <div>
+                      <Label htmlFor="bulk-utm-custom-proj" className="text-xs">Custom Proj4 String</Label>
+                      <Input
+                        id="bulk-utm-custom-proj"
+                        value={bulkCustomProjString}
+                        onChange={(e) => setBulkCustomProjString(e.target.value)}
+                        placeholder="+proj=utm +zone=XX +hem=N +datum=WGS84..."
+                      />
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Example for UTM Zone 43N: <code>+proj=utm +zone=43 +datum=WGS84 +units=m +no_defs +hemisphere=N</code>
+                  </p>
+                  <Button onClick={handleBulkApplyUtmToFile} disabled={isLoading || !selectedFileIdForBulkUtm || !bulkUtmZone} size="sm">
+                    <Sparkles className="mr-2 h-4 w-4" /> Apply to Selected File
+                  </Button>
+                </div>
+              )}
+
 
               <div>
                 <h3 className="font-semibold text-md mb-2 flex items-center"><ShieldAlert className="mr-2 h-5 w-5 text-destructive" />Issue Log & Actions</h3>
@@ -528,27 +700,27 @@ export default function DataForgeStudio() {
                   <Table>
                     <TableHeader className="sticky top-0 bg-background z-10">
                       <TableRow>
-                        <TableHead className="w-[60px]">
-                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('isError', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
-                            Include {getSortIndicator<TransformationLogEntry>('isError', issueSortConfig)}
+                        <TableHead className="w-[80px] px-2 py-1">
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier' as any, issueSortConfig, setIssueSortConfig)} className="px-1 text-xs text-left w-full justify-start">
+                            Include {getSortIndicator<TransformationLogEntry>('rowIdentifier' as any, issueSortConfig)}
                           </Button>
                         </TableHead>
-                        <TableHead className="w-[150px]">
-                          <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                        <TableHead className="w-[150px] px-2 py-1">
+                          <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                            ID/Row {getSortIndicator<TransformationLogEntry>('rowIdentifier', issueSortConfig)}
                           </Button>
                         </TableHead>
-                        <TableHead>
-                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                        <TableHead className="px-2 py-1">
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                             Fields {getSortIndicator<TransformationLogEntry>('field', issueSortConfig)}
                           </Button>
                         </TableHead>
-                        <TableHead>
-                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('details', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs">
+                        <TableHead className="px-2 py-1">
+                           <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('details', issueSortConfig, setIssueSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                             Details {getSortIndicator<TransformationLogEntry>('details', issueSortConfig)}
                            </Button>
                         </TableHead>
-                        <TableHead className="w-[150px] text-center">Action</TableHead>
+                        <TableHead className="w-[150px] text-center px-2 py-1">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -558,7 +730,7 @@ export default function DataForgeStudio() {
                         const rowIndexInProcessedJson = processedJson?.findIndex(pr => pr.__id__ === rowId) ?? -1;
                         return (
                           <TableRow key={`${rowId}-${log.field}-${index}`} className={rowsDeselected.has(rowId) ? 'opacity-50 bg-muted/30' : ''}>
-                            <TableCell className="text-center">
+                            <TableCell className="text-center px-2 py-1">
                               <TooltipProvider>
                                 <Tooltip>
                                   <TooltipTrigger asChild>
@@ -574,20 +746,20 @@ export default function DataForgeStudio() {
                                 </Tooltip>
                               </TooltipProvider>
                             </TableCell>
-                            <TableCell className="text-xs font-medium" title={log.fileId}>
+                            <TableCell className="text-xs font-medium px-2 py-1" title={log.fileId}>
                                 {log.rowIdentifier}
                                 <div className="text-muted-foreground text-[10px]">File: {uploadedFilesData.find(f=>f.id === log.fileId)?.fileName}</div>
                             </TableCell>
-                            <TableCell className="text-xs">{log.field}</TableCell>
-                            <TableCell className="text-xs">
+                            <TableCell className="text-xs px-2 py-1">{log.field}</TableCell>
+                            <TableCell className="text-xs px-2 py-1">
                               <span className={`font-semibold ${log.status === 'Error' ? 'text-destructive' : log.requiresUtmInput ? 'text-amber-600' : 'text-muted-foreground'}`}>
                                 {log.status}:
                               </span> {log.details} 
                               {log.originalValue !== undefined && log.originalValue !== null && String(log.originalValue).length < 50 && <span className="text-muted-foreground text-[10px]"> (Original: {String(log.originalValue)})</span>}
                             </TableCell>
-                            <TableCell className="text-center">
+                            <TableCell className="text-center px-2 py-1">
                               {log.requiresUtmInput && correspondingProcessedRow && rowIndexInProcessedJson !== -1 && !utmZoneOverrides.has(rowId) && (
-                                <Button variant="outline" size="sm" className="text-xs" onClick={() => handleUtmModalOpen(correspondingProcessedRow, rowIndexInProcessedJson)}>
+                                <Button variant="outline" size="sm" className="text-xs h-7 px-2" onClick={() => handleUtmModalOpen(correspondingProcessedRow, rowIndexInProcessedJson)}>
                                   Provide UTM
                                 </Button>
                               )}
@@ -620,37 +792,37 @@ export default function DataForgeStudio() {
                 <Table>
                   <TableHeader className="sticky top-0 bg-background z-10">
                     <TableRow>
-                       <TableHead className="w-[150px]">
-                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                       <TableHead className="w-[150px] px-2 py-1">
+                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('rowIdentifier', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                            ID/Row {getSortIndicator<TransformationLogEntry>('rowIdentifier', validationSortConfig)}
                           </Button>
                         </TableHead>
-                      <TableHead>
-                        <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                      <TableHead className="px-2 py-1">
+                        <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('field', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                            Field {getSortIndicator<TransformationLogEntry>('field', validationSortConfig)}
                           </Button>
                       </TableHead>
-                      <TableHead>Original Value</TableHead>
-                      <TableHead>Transformed Value</TableHead>
-                      <TableHead className="w-[100px]">
-                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('status', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs">
+                      <TableHead className="px-2 py-1">Original Value</TableHead>
+                      <TableHead className="px-2 py-1">Transformed Value</TableHead>
+                      <TableHead className="w-[100px] px-2 py-1">
+                         <Button variant="ghost" size="sm" onClick={() => requestSort<TransformationLogEntry>('status', validationSortConfig, setValidationSortConfig)} className="px-1 text-xs text-left w-full justify-start">
                            Status {getSortIndicator<TransformationLogEntry>('status', validationSortConfig)}
                           </Button>
                       </TableHead>
-                      <TableHead>Details</TableHead>
+                      <TableHead className="px-2 py-1">Details</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {sortedValidationLog.map((log, index) => (
                       <TableRow key={`${log.fileId}-${log.originalRowIndex}-${log.field}-${index}`} className={rowsDeselected.has(`${log.fileId}-${log.originalRowIndex}`) ? 'opacity-40' : ''}>
-                        <TableCell className="text-xs font-medium" title={log.fileId}>
+                        <TableCell className="text-xs font-medium px-2 py-1" title={log.fileId}>
                             {log.rowIdentifier}
                             <div className="text-muted-foreground text-[10px]">File: {uploadedFilesData.find(f=>f.id === log.fileId)?.fileName}</div>
                         </TableCell>
-                        <TableCell className="text-xs">{log.field}</TableCell>
-                        <TableCell className="text-xs font-mono max-w-[150px] truncate" title={String(log.originalValue)}>{String(log.originalValue)}</TableCell>
-                        <TableCell className="text-xs font-mono max-w-[150px] truncate" title={String(log.transformedValue)}>{String(log.transformedValue)}</TableCell>
-                        <TableCell className="text-xs">
+                        <TableCell className="text-xs px-2 py-1">{log.field}</TableCell>
+                        <TableCell className="text-xs font-mono max-w-[150px] truncate px-2 py-1" title={String(log.originalValue)}>{String(log.originalValue)}</TableCell>
+                        <TableCell className="text-xs font-mono max-w-[150px] truncate px-2 py-1" title={String(log.transformedValue)}>{String(log.transformedValue)}</TableCell>
+                        <TableCell className="text-xs px-2 py-1">
                           <span className={`px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${
                             log.status === 'Transformed' ? 'bg-blue-100 text-blue-700' :
                             log.status === 'Filled' ? 'bg-green-100 text-green-700' :
@@ -661,7 +833,7 @@ export default function DataForgeStudio() {
                             {log.status}
                           </span>
                         </TableCell>
-                        <TableCell className="text-xs max-w-[200px] truncate" title={log.details}>{log.details}</TableCell>
+                        <TableCell className="text-xs max-w-[200px] truncate px-2 py-1" title={log.details}>{log.details}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -677,7 +849,7 @@ export default function DataForgeStudio() {
             <Card className="shadow-lg">
                 <CardHeader>
                     <CardTitle className="flex items-center text-xl"><Settings2 className="mr-2 h-5 w-5" />Edit JSON Structure</CardTitle>
-                    <CardDescription>Reorder fields by dragging, or uncheck to exclude them from the final output. These settings apply to all files.</CardDescription>
+                    <CardDescription>Reorder fields or uncheck to exclude them from the final output. These settings apply to all files.</CardDescription>
                 </CardHeader>
                 <CardContent>
                     {keyOrderConfig.length > 0 ? (
@@ -696,8 +868,8 @@ export default function DataForgeStudio() {
                                 </div>
                                 <div className="space-x-1">
                                     <TooltipProvider>
-                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(keyItem.name, 'up')} disabled={keyItem.order === 0}>↑</Button></TooltipTrigger><TooltipContent><p>Move Up</p></TooltipContent></Tooltip>
-                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="sm" onClick={() => handleKeyOrderChange(keyItem.name, 'down')} disabled={keyItem.order === keyOrderConfig.length - 1}>↓</Button></TooltipTrigger><TooltipContent><p>Move Down</p></TooltipContent></Tooltip>
+                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleKeyOrderChange(keyItem.name, 'up')} disabled={keyItem.order === 0}>↑</Button></TooltipTrigger><TooltipContent><p>Move Up</p></TooltipContent></Tooltip>
+                                        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleKeyOrderChange(keyItem.name, 'down')} disabled={keyItem.order === keyOrderConfig.length - 1}>↓</Button></TooltipTrigger><TooltipContent><p>Move Down</p></TooltipContent></Tooltip>
                                     </TooltipProvider>
                                 </div>
                             </div>
@@ -752,10 +924,10 @@ export default function DataForgeStudio() {
                     {showColumnDescriptions && columnDescriptions ? (
                         <ScrollArea className="h-[200px] border rounded-md p-2 bg-background">
                         <Table>
-                            <TableHeader><TableRow><TableHead className="w-[150px] text-xs">Column</TableHead><TableHead className="text-xs">AI Description</TableHead></TableRow></TableHeader>
+                            <TableHeader><TableRow><TableHead className="w-[150px] text-xs px-2 py-1">Column</TableHead><TableHead className="text-xs px-2 py-1">AI Description</TableHead></TableRow></TableHeader>
                             <TableBody>
                             {Object.entries(columnDescriptions).map(([col, desc]) => (
-                                <TableRow key={col}><TableCell className="font-medium text-xs">{col}</TableCell><TableCell className="text-xs">{desc}</TableCell></TableRow>
+                                <TableRow key={col}><TableCell className="font-medium text-xs px-2 py-1">{col}</TableCell><TableCell className="text-xs px-2 py-1">{desc}</TableCell></TableRow>
                             ))}
                             </TableBody>
                         </Table>
@@ -786,6 +958,7 @@ export default function DataForgeStudio() {
           onClose={() => setIsUtmModalOpen(false)}
           onSave={handleUtmSave}
           rowData={currentRowForUtmInput}
+          commonUtmZones={commonUtmZones}
         />
       )}
 
@@ -807,3 +980,4 @@ function getRowIdentifier(row: JsonObject, rowIndex: number, fileName: string): 
   }
   return `${fileName} Original Row ${rowIndex + 1}`;
 }
+
