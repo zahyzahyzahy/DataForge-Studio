@@ -325,9 +325,15 @@ export function applyIntelligentTransformations(
         const processedVal = processedRow[fieldKey];
         let status: TransformationStatus = 'Unchanged';
         let details = 'No transformation applied or value remained effectively same.';
+
+         // UTM Conversion: New Lat/Long values after UTM transformation should be included
+        if ((fieldKey === 'Lat' || fieldKey === 'Long') && processedRow.__utmZoneProvided__) {
+            status = 'Filled'; // UTM to Lat/Long
+            details = `From UTM E/N (Zone: ${processedRow.__utmZoneProvided__ || 'User-Provided'})`;
+        }
         
         // Basic check for type changes for numeric-like strings
-        if (typeof originalVal === 'string' && typeof processedVal === 'number' && parseFloat(originalVal) === processedVal) {
+        else if (typeof originalVal === 'string' && typeof processedVal === 'number' && parseFloat(originalVal) === processedVal) {
             status = 'Transformed'; // Or 'Coerced'
             details = 'Type coerced from string to number during initial parse.';
         } else if (originalVal !== processedVal && !(Number.isNaN(originalVal) && Number.isNaN(processedVal))) {
