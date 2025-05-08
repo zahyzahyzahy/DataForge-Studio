@@ -11,7 +11,7 @@ import { applyIntelligentTransformations } from '@/lib/data-transformer';
 import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -224,9 +224,10 @@ export default function DataForgeStudio() {
       mappedInput.forEach(file => {
         file.data.forEach((originalRow, idx) => {
           const rowId = getRowIdentifier(originalRow, idx, file.fileName);
+          const uniqueProcessedRowId = `${file.fileId}-${idx}`;
           const processedRow: ProcessedRow = {
             ...originalRow,
-            __id__: `${file.fileId}-${idx}`,
+            __id__: uniqueProcessedRowId,
             __originalRowIndex__: idx,
             __fileId__: file.fileId,
             __fileName__: file.fileName,
@@ -519,6 +520,11 @@ export default function DataForgeStudio() {
     }
     return currentSortConfig.direction === 'ascending' ? '↑' : '↓';
   };
+  
+  const outputTableHeaders = useMemo(() => {
+    if (!finalJsonOutputForPreview || finalJsonOutputForPreview.length === 0) return [];
+    return Object.keys(finalJsonOutputForPreview[0]);
+  }, [finalJsonOutputForPreview]);
 
 
   return (
@@ -887,18 +893,56 @@ export default function DataForgeStudio() {
           <Card className="shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center text-xl"><FileJson className="mr-2 h-5 w-5" />Final Output Preview</CardTitle>
-              <CardDescription>This is a preview of your final JSON data after merging, transformations, and structure edits. Only the first 10 records are shown here.</CardDescription>
+              <CardDescription>Preview your final JSON data (first 10 records in raw format, full data in table view) after merging, transformations, and structure edits.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <ScrollArea className="h-[400px] w-full border rounded-md bg-muted/20">
-                <Textarea
-                    value={previewData}
-                    readOnly
-                    rows={20}
-                    className="w-full font-mono text-xs bg-background p-2" 
-                    placeholder="JSON output will appear here..."
-                />
-              </ScrollArea>
+              
+              <Tabs defaultValue="raw-json" className="w-full">
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="raw-json"><FileJson className="mr-2 h-4 w-4" />Raw JSON (10 Records)</TabsTrigger>
+                  <TabsTrigger value="table-view"><TableIcon className="mr-2 h-4 w-4" />Table View (All Records)</TabsTrigger>
+                </TabsList>
+                <TabsContent value="raw-json" className="mt-4">
+                  <ScrollArea className="h-[400px] w-full border rounded-md bg-muted/20">
+                    <Textarea
+                        value={previewData}
+                        readOnly
+                        rows={20}
+                        className="w-full font-mono text-xs bg-background p-2" 
+                        placeholder="JSON output will appear here..."
+                    />
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="table-view" className="mt-4">
+                  {finalJsonOutputForPreview && finalJsonOutputForPreview.length > 0 ? (
+                    <ScrollArea className="h-[600px] w-full border rounded-md">
+                      <Table>
+                        <TableHeader className="sticky top-0 bg-background z-10">
+                          <TableRow>
+                            {outputTableHeaders.map(header => (
+                              <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">{header}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {finalJsonOutputForPreview.map((row, rowIndex) => (
+                            <TableRow key={`output-row-${rowIndex}`}>
+                              {outputTableHeaders.map(header => (
+                                <TableCell key={`output-cell-${rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate" title={String(row[header])}>
+                                  {String(row[header])}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  ) : (
+                    <p className="text-sm text-muted-foreground p-4 border rounded-md text-center">No data to display in table view. Process files or check filters.</p>
+                  )}
+                </TabsContent>
+              </Tabs>
+
 
               <div>
                 <h3 className="font-semibold text-md mb-2 flex items-center"><Lightbulb className="mr-2 h-5 w-5 text-yellow-400" />AI Insights</h3>
