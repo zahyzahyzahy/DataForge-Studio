@@ -9,10 +9,10 @@ import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
 import { parseCsvToJson } from '@/lib/csv-parser';
 import { applyIntelligentTransformations } from '@/lib/data-transformer';
-import { mergeJsonArrays, restructureJsonArray, downloadJson, type JsonObject } from '@/lib/json-utils';
+import { downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List, Link2Off, MapPinOff, MapPin } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List, Link2Off, MapPinOff, MapPin, Edit } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -49,7 +49,8 @@ import type { FileWithData as OriginalFileWithData, ProcessedJsonArray, Processe
 
 
 interface KeyConfig {
-  name: string;
+  name: string; // Original name from CSV
+  newName: string; // User-editable new name for JSON output
   included: boolean;
   order: number;
 }
@@ -272,21 +273,12 @@ export default function DataForgeStudio() {
       transformationResult = { transformedData: basicProcessedData, transformationLog: basicLog };
     }
     
-    // If E/N data was provided via modal and used, update the processedJson directly
-    // This logic might need refinement if applyIntelligentTransformations doesn't directly use the E/N from overrides
-    // For now, assume applyIntelligentTransformations handles it if E/N was part of the override logic for that row.
-    // If applyIntelligentTransformations needs explicit E/N, it should take the full UTMModalInputData map.
-    // For simplicity, we're assuming applyIntelligentTransformations primarily uses the `utmInput` (zone/proj string) from the overrides.
-    // If a row had its E/N updated via modal, that change needs to be reflected in `transformationResult.transformedData`
-    // or `applyIntelligentTransformations` must be re-run with the E/N modified `originalRow`.
-    // This re-processing is typically handled by the caller of processAndTransformFiles after modal save.
-
     setProcessedJson(transformationResult.transformedData);
     setTransformationLog(transformationResult.transformationLog);
     
     if (transformationResult.transformedData && transformationResult.transformedData.length > 0) {
       const sampleKeys = Object.keys(transformationResult.transformedData[0]).filter(k => !k.startsWith('__') && k !== '__requiresURLInputForIsland__');
-      setKeyOrderConfig(sampleKeys.map((name, index) => ({ name, included: true, order: index })));
+      setKeyOrderConfig(sampleKeys.map((name, index) => ({ name, newName: name, included: true, order: index })));
       
       // Initialize editablePsmNumbers
       const initialPsmNumbers: Record<string, string> = {};
@@ -340,14 +332,8 @@ export default function DataForgeStudio() {
     setUtmZoneOverrides(updatedOverrides);
     setIsUtmModalOpen(false);
     
-    // If E/N data was also provided, we need to update the original data source and re-process.
-    // This is a bit complex as `uploadedFilesData` holds the "original" state.
-    // We might need to modify a temporary copy of `uploadedFilesData` or directly update `processedJson`
-    // and then let `applyIntelligentTransformations` re-evaluate with new zone.
-    
     let filesToReProcess = uploadedFilesData;
     if (utmData.easting !== undefined && utmData.northing !== undefined) {
-        // Find and update the specific row in uploadedFilesData
         const fileIndex = uploadedFilesData.findIndex(f => f.id === currentRowForUtmInput.row.__fileId__);
         if (fileIndex !== -1) {
             const dataIndex = currentRowForUtmInput.row.__originalRowIndex__;
@@ -356,7 +342,6 @@ export default function DataForgeStudio() {
                 const eastingKeyToUpdate = Object.keys(fileData[dataIndex]).find(k => k.toLowerCase() === 'easting/m' || k.toLowerCase() === 'easting') || 'Easting/m';
                 const northingKeyToUpdate = Object.keys(fileData[dataIndex]).find(k => k.toLowerCase() === 'northing/m' || k.toLowerCase() === 'northing') || 'Northing/m';
                 
-                // Create a deep copy to avoid direct state mutation if `fileData` items are shared objects
                 const updatedFilesData = JSON.parse(JSON.stringify(uploadedFilesData));
                 updatedFilesData[fileIndex].data[dataIndex][eastingKeyToUpdate] = parseFloat(utmData.easting);
                 updatedFilesData[fileIndex].data[dataIndex][northingKeyToUpdate] = parseFloat(utmData.northing);
@@ -364,7 +349,6 @@ export default function DataForgeStudio() {
             }
         }
     }
-
 
     if (filesToReProcess.length > 0) {
       toast({title: "Re-processing", description: "Applying new UTM/Coordinate information...", variant: "default"});
@@ -395,13 +379,13 @@ export default function DataForgeStudio() {
       if (selected) {
         setBulkUtmZone({ zone: selected.zone, hemisphere: selected.hemisphere });
       } else {
-        setBulkUtmZone(null); // Or a default if preferred
+        setBulkUtmZone(null); 
       }
-    } else { // manual input
+    } else { 
       if (bulkCustomProjString.trim()) {
         setBulkUtmZone(bulkCustomProjString.trim());
       } else {
-        setBulkUtmZone(null); // Clear if custom string is empty
+        setBulkUtmZone(null); 
       }
     }
   }, [bulkUtmInputType, bulkSelectedZoneValue, bulkCustomProjString]);
@@ -420,9 +404,8 @@ export default function DataForgeStudio() {
     let changesMade = 0;
   
     processedJson?.forEach(row => {
-      // Apply if the row needs UTM zone input (E/N presumed present) AND it's in the selected file
       if (row.__fileId__ === selectedFileIdForBulkUtm && row.__needsUTMZoneInput__) {
-        newOverrides.set(row.__id__, { utmInput: bulkUtmZone }); // Only apply zone, E/N assumed present
+        newOverrides.set(row.__id__, { utmInput: bulkUtmZone }); 
         changesMade++;
       }
     });
@@ -444,6 +427,11 @@ export default function DataForgeStudio() {
     await processAndTransformFiles(uploadedFilesData, applySmartTransforms, newOverrides, userProvidedIslandUrls);
   };
 
+  const handleKeyRename = (originalName: string, newName: string) => {
+    setKeyOrderConfig(prev =>
+      prev.map(k => (k.name === originalName ? { ...k, newName: newName.trim() || k.name } : k))
+    );
+  };
 
   const handleKeyOrderChange = (keyName: string, direction: 'up' | 'down') => {
     setKeyOrderConfig(prev => {
@@ -481,38 +469,56 @@ export default function DataForgeStudio() {
   
   const getFinalJson = useCallback(() => {
     if (!processedJson) return null;
-    
-    let filteredData = processedJson.filter(row => !rowsDeselected.has(row.__id__));
 
-    // Apply edited PSM numbers
-    filteredData = filteredData.map(row => {
-      const newPsmNumber = editablePsmNumbers[row.__id__];
-      if (newPsmNumber !== undefined && row.__identifierKey__) {
-        return { ...row, [row.__identifierKey__]: newPsmNumber };
-      }
-      // If no specific identifier key or not editable, return original
-      // Or if it's a generic identifier (__rowIdentifier__) and it was edited
-      if (newPsmNumber !== undefined && !row.__identifierKey__ && row.__rowIdentifier__ !== newPsmNumber) {
-         // This case is tricky. If __rowIdentifier__ was generic (like "FileX Row Y")
-         // and it's edited, it doesn't map to a specific column.
-         // For simplicity, we assume edits are primarily for rows with a real identifierKey.
-         // However, if we want to allow changing the __rowIdentifier__ itself when no key, that logic would be different.
-         // For now, prioritize __identifierKey__ for edits.
-      }
-      return row;
-    });
+    const filteredData = processedJson.filter(row => !rowsDeselected.has(row.__id__));
 
-    const orderedKeys = keyOrderConfig
-      .filter(k => k.included)
-      .sort((a,b) => a.order - b.order)
-      .map(k => k.name);
+    return filteredData.map(originalRow => {
+      const newObj: JsonObject = {};
+      let tempRowWithPsmEdit = { ...originalRow };
+
+      // Apply PSM edits if an identifier key exists and was edited
+      const psmEditValue = editablePsmNumbers[originalRow.__id__];
+      const originalIdentifierKey = originalRow.__identifierKey__;
+
+      if (psmEditValue !== undefined && originalIdentifierKey) {
+          // Find the KeyConfig for the original identifier key to get its newName
+          const identifierKeyConf = keyOrderConfig.find(kc => kc.name === originalIdentifierKey);
+          const finalIdentifierKeyName = identifierKeyConf?.newName || originalIdentifierKey;
+          
+          // If the identifier key itself was renamed, we need to make sure the edit applies to the new key name
+          // and the old key name is not present in the final object unless it's a different, non-identifier field.
+          // Create a temporary copy of the row to modify for PSM edits.
+          // Remove the original identifier key value before potentially adding it back with a new name and/or value
+          delete tempRowWithPsmEdit[originalIdentifierKey];
+          tempRowWithPsmEdit[finalIdentifierKeyName] = psmEditValue; // Place the edited value under the final key name
+      }
+
+
+      keyOrderConfig
+        .filter(k => k.included)
+        .sort((a, b) => a.order - b.order)
+        .forEach(keyConf => {
+          const outputKeyName = keyConf.newName || keyConf.name;
+          
+          // If the current keyConf.name is the original identifier key,
+          // and it has been potentially renamed and its value edited (handled above in tempRowWithPsmEdit)
+          if (keyConf.name === originalIdentifierKey && tempRowWithPsmEdit.hasOwnProperty(outputKeyName)) {
+            newObj[outputKeyName] = tempRowWithPsmEdit[outputKeyName];
+          } 
+          // For all other keys (or if identifier key wasn't edited/renamed in a conflicting way)
+          else if (originalRow.hasOwnProperty(keyConf.name)) {
+             newObj[outputKeyName] = originalRow[keyConf.name];
+          }
+        });
       
-    const includedKeysMap = keyOrderConfig.reduce((acc, k) => {
-      acc[k.name] = k.included;
-      return acc;
-    }, {} as Record<string, boolean>);
-
-    return restructureJsonArray(filteredData, orderedKeys, includedKeysMap, true); 
+      // Strip out any remaining __internal__ keys from the final object that weren't handled by keyOrderConfig
+      Object.keys(newObj).forEach(key => {
+        if (key.startsWith('__')) {
+          delete newObj[key];
+        }
+      });
+      return newObj;
+    });
   }, [processedJson, keyOrderConfig, rowsDeselected, editablePsmNumbers]);
 
 
@@ -532,14 +538,19 @@ export default function DataForgeStudio() {
       return;
     }
     
-    const headers = keyOrderConfig.filter(k => k.included).map(k => k.name);
-    if (headers.length === 0) {
+    const activeKeyConfigs = keyOrderConfig.filter(k => k.included);
+    if (activeKeyConfigs.length === 0) {
          toast({ title: 'No Columns', description: 'No columns selected for description generation.', variant: 'destructive' });
          return;
     }
+
+    const headersForAI = activeKeyConfigs.map(k => k.newName || k.name);
+    
     const sampleCsvData = [
-      headers.join(','),
-      ...processedJson.slice(0, 5).map(row => headers.map(header => JSON.stringify(row[header])).join(','))
+      headersForAI.join(','), // Use new/renamed headers for the CSV header row sent to AI
+      ...processedJson.slice(0, 5).map(row => 
+        activeKeyConfigs.map(kConf => JSON.stringify(row[kConf.name])).join(',') // Fetch data using original key name from processedJson
+      ) 
     ].join('\n');
 
     setIsLoading(true);
@@ -759,7 +770,7 @@ export default function DataForgeStudio() {
                 </Alert>
               )}
 
-              {filesWithPendingUtmInput.length > 0 && ( // For bulk UTM zone application
+              {filesWithPendingUtmInput.length > 0 && ( 
                 <div className="p-4 border rounded-md space-y-4 bg-muted/10">
                   <h3 className="font-semibold text-md flex items-center"><MapPin className="mr-2 h-5 w-5 text-primary" />Bulk Apply UTM Zone to a File</h3>
                   <p className="text-xs text-muted-foreground">This applies a UTM zone to rows in the selected file that have Easting/Northing data but are missing the zone. Rows needing Easting/Northing values must be addressed individually.</p>
@@ -1020,24 +1031,38 @@ export default function DataForgeStudio() {
             <Card className="shadow-lg">
                 <CardHeader>
                     <CardTitle className="flex items-center text-xl"><Settings2 className="mr-2 h-5 w-5" />Edit JSON Structure</CardTitle>
-                    <CardDescription>Reorder fields or uncheck to exclude them from the final output. These settings apply to all files.</CardDescription>
+                    <CardDescription>Reorder fields, rename them for the output, or uncheck to exclude them. These settings apply to all files.</CardDescription>
                 </CardHeader>
                 <CardContent>
                     {keyOrderConfig.length > 0 ? (
-                        <ScrollArea className="h-[400px] w-full border rounded-md p-2 bg-muted/20">
+                        <ScrollArea className="h-[600px] w-full border rounded-md p-2 bg-muted/20">
                         <div className="space-y-2 p-2">
+                            <div className="grid grid-cols-[auto_1fr_1fr_auto] gap-x-2 items-center px-3 py-2 font-medium text-xs text-muted-foreground">
+                                <span>Include</span>
+                                <span>Original Name</span>
+                                <span>New Name (for JSON Output)</span>
+                                <span>Order</span>
+                            </div>
                         {keyOrderConfig.sort((a,b) => a.order - b.order).map((keyItem) => (
-                            <div key={keyItem.name} className="flex items-center justify-between p-3 border rounded-md bg-background shadow-sm hover:shadow-md transition-shadow">
-                                <div className="flex items-center space-x-3">
-                                    <Checkbox
-                                        id={`key-${keyItem.name}`}
-                                        checked={keyItem.included}
-                                        onCheckedChange={() => handleKeyInclusionChange(keyItem.name)}
-                                        aria-label={`Include field ${keyItem.name}`}
-                                    />
-                                    <Label htmlFor={`key-${keyItem.name}`} className="font-medium text-sm">{keyItem.name}</Label>
-                                </div>
-                                <div className="space-x-1">
+                            <div key={keyItem.name} className="grid grid-cols-[auto_1fr_1fr_auto] gap-x-3 items-center p-3 border rounded-md bg-background shadow-sm hover:shadow-md transition-shadow">
+                                <Checkbox
+                                    id={`key-include-${keyItem.name}`}
+                                    checked={keyItem.included}
+                                    onCheckedChange={() => handleKeyInclusionChange(keyItem.name)}
+                                    aria-label={`Include field ${keyItem.name}`}
+                                    className="justify-self-center"
+                                />
+                                <Label htmlFor={`key-rename-${keyItem.name}`} className="font-medium text-sm truncate" title={keyItem.name}>
+                                    {keyItem.name}
+                                </Label>
+                                <Input
+                                    id={`key-rename-${keyItem.name}`}
+                                    value={keyItem.newName}
+                                    onChange={(e) => handleKeyRename(keyItem.name, e.target.value)}
+                                    placeholder="Enter new name"
+                                    className="h-8 text-sm"
+                                />
+                                <div className="space-x-1 justify-self-end">
                                     <TooltipProvider>
                                         <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleKeyOrderChange(keyItem.name, 'up')} disabled={keyItem.order === 0}>↑</Button></TooltipTrigger><TooltipContent><p>Move Up</p></TooltipContent></Tooltip>
                                         <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleKeyOrderChange(keyItem.name, 'down')} disabled={keyItem.order === keyOrderConfig.length - 1}>↓</Button></TooltipTrigger><TooltipContent><p>Move Down</p></TooltipContent></Tooltip>
@@ -1058,7 +1083,7 @@ export default function DataForgeStudio() {
           <Card className="shadow-lg">
             <CardHeader>
               <CardTitle className="flex items-center text-xl"><FileJson className="mr-2 h-5 w-5" />Final Output Preview & Edit</CardTitle>
-              <CardDescription>Preview your final JSON data. You can edit PSM Station Numbers (or equivalent identifiers) directly in the table before downloading.</CardDescription>
+              <CardDescription>Preview your final JSON data. You can edit PSM Station Numbers (or equivalent identifiers identified by `__identifierKey__`) directly in the table before downloading.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               
@@ -1076,12 +1101,15 @@ export default function DataForgeStudio() {
                           <TableRow>
                             <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><List className="h-4 w-4 inline-block mr-1" />#</TableHead>
                             {outputTableHeaders.map(header => {
-                              // Determine if this header is the editable identifier
-                              const isEditableIdentifierHeader = processedJson && processedJson.length > 0 && header === processedJson[0].__identifierKey__;
+                              const originalIdentifierKey = processedJson?.[0]?.__identifierKey__;
+                              const identifierKeyConfig = originalIdentifierKey ? keyOrderConfig.find(k => k.name === originalIdentifierKey) : null;
+                              const finalEditableHeaderName = identifierKeyConfig?.newName || originalIdentifierKey;
+                              const isEditableIdentifierHeader = finalEditableHeaderName && header === finalEditableHeaderName;
+                              
                               return (
                                 <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">
                                   {header}
-                                  {isEditableIdentifierHeader && <Edit3 className="h-3 w-3 inline-block ml-1 text-muted-foreground" />}
+                                  {isEditableIdentifierHeader && <Edit3 className="h-3 w-3 inline-block ml-1 text-muted-foreground" title="This column is editable" />}
                                 </TableHead>
                               );
                             })}
@@ -1089,21 +1117,41 @@ export default function DataForgeStudio() {
                         </TableHeader>
                         <TableBody>
                           {finalJsonOutputForPreview.map((row, rowIndex) => {
-                            const originalProcessedRow = processedJson?.find(pRow => pRow.__id__ === (row as ProcessedRow).__id__); // Need original for __id__ and __identifierKey__
-                            const rowId = originalProcessedRow?.__id__;
-                            const identifierKey = originalProcessedRow?.__identifierKey__;
+                            // Find the original processed row to get __id__ and __identifierKey__
+                            // This assumes finalJsonOutputForPreview maintains some link or can be mapped back.
+                            // If finalJsonOutputForPreview rows don't have __id__, this needs adjustment.
+                            // For now, we rely on getFinalJson creating objects that can be related back if needed,
+                            // or more directly, editablePsmNumbers is keyed by __id__ from the original processedJson.
+                            const originalProcessedItem = processedJson?.find(
+                                (pRow) => {
+                                    // This is a fallback logic. Ideally, `row` in finalJsonOutputForPreview should still have `__id__`
+                                    // or `getFinalJson` should pass it through if it's not stripped.
+                                    // For now, let's assume pRow.__rowIdentifier__ can be matched if psmNumber changes.
+                                    // Best if __id__ is present on `row` from `finalJsonOutputForPreview`.
+                                    // Let's assume `getFinalJson` doesn't strip `__id__` or `finalJsonOutputForPreview` is based on `processedJson`
+                                    // such that we can find the matching `__id__`.
+                                    // This might be brittle. A safer way is to ensure `__id__` is part of the `row` object here or map based on index.
+                                    // Let's use index for now, assuming `finalJsonOutputForPreview` order matches filtered `processedJson`.
+                                    const filteredProcessedJson = processedJson.filter(p => !rowsDeselected.has(p.__id__));
+                                    return filteredProcessedJson[rowIndex]?.__id__ === pRow.__id__;
+                                }
+                            );
+                            const rowId = originalProcessedItem?.__id__; // This is crucial for editing state
+                            const originalIdentifierKey = originalProcessedItem?.__identifierKey__;
+                            const identifierKeyConfig = originalIdentifierKey ? keyOrderConfig.find(k => k.name === originalIdentifierKey) : null;
+                            const finalEditableHeaderName = identifierKeyConfig?.newName || originalIdentifierKey;
 
                             return (
-                              <TableRow key={`output-row-${rowIndex}`}>
+                              <TableRow key={`output-row-${rowId || rowIndex}`}>
                                 <TableCell className="text-xs px-2 py-1 font-medium text-muted-foreground">{rowIndex + 1}</TableCell>
                                 {outputTableHeaders.map(header => {
-                                  const isEditableField = rowId && identifierKey && header === identifierKey;
+                                  const isEditableField = rowId && finalEditableHeaderName && header === finalEditableHeaderName;
                                   return (
-                                    <TableCell key={`output-cell-${rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate">
+                                    <TableCell key={`output-cell-${rowId || rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate" title={String(row[header])}>
                                       {isEditableField && rowId ? (
                                         <Input
                                           type="text"
-                                          value={editablePsmNumbers[rowId] || String(row[header])}
+                                          value={editablePsmNumbers[rowId] ?? String(row[header])} // Use stored edit or current value
                                           onChange={(e) => handlePsmNumberChange(rowId, e.target.value)}
                                           className="h-7 text-xs p-1"
                                         />
