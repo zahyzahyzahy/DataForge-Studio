@@ -12,7 +12,7 @@ import { applyIntelligentTransformations } from '@/lib/data-transformer';
 import { downloadJson, type JsonObject } from '@/lib/json-utils';
 import { suggestTransformations, type SuggestTransformationsOutput } from '@/ai/flows/suggest-transformations';
 import { generateColumnDescriptions, type GenerateColumnDescriptionsOutput } from '@/ai/flows/generate-column-descriptions';
-import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List, Link2Off, MapPinOff, MapPin, Edit } from 'lucide-react';
+import { UploadCloud, FileJson, Edit3, Download, Sparkles, Info, AlertTriangle, Loader2, Lightbulb, Settings2, ListChecks, ShieldAlert, Eye, FileWarning, GitCompareArrows, CheckCircle2, XCircle, AlertCircle, ArrowUpDown, FileCog, TableIcon, List, Link2Off, MapPinOff, MapPin, Edit, ListOrdered } from 'lucide-react';
 import { Textarea } from './ui/textarea';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
@@ -429,7 +429,7 @@ export default function DataForgeStudio() {
 
   const handleKeyRename = (originalName: string, newName: string) => {
     setKeyOrderConfig(prev =>
-      prev.map(k => (k.name === originalName ? { ...k, newName: newName.trim() || k.name } : k))
+      prev.map(k => (k.name === originalName ? { ...k, newName: newName } : k))
     );
   };
 
@@ -476,21 +476,16 @@ export default function DataForgeStudio() {
       const newObj: JsonObject = {};
       let tempRowWithPsmEdit = { ...originalRow };
 
-      // Apply PSM edits if an identifier key exists and was edited
       const psmEditValue = editablePsmNumbers[originalRow.__id__];
       const originalIdentifierKey = originalRow.__identifierKey__;
 
       if (psmEditValue !== undefined && originalIdentifierKey) {
-          // Find the KeyConfig for the original identifier key to get its newName
           const identifierKeyConf = keyOrderConfig.find(kc => kc.name === originalIdentifierKey);
-          const finalIdentifierKeyName = identifierKeyConf?.newName || originalIdentifierKey;
+          const trimmedNewName = identifierKeyConf && typeof identifierKeyConf.newName === 'string' ? identifierKeyConf.newName.trim() : '';
+          const finalIdentifierKeyName = (trimmedNewName !== '') ? trimmedNewName : originalIdentifierKey;
           
-          // If the identifier key itself was renamed, we need to make sure the edit applies to the new key name
-          // and the old key name is not present in the final object unless it's a different, non-identifier field.
-          // Create a temporary copy of the row to modify for PSM edits.
-          // Remove the original identifier key value before potentially adding it back with a new name and/or value
           delete tempRowWithPsmEdit[originalIdentifierKey];
-          tempRowWithPsmEdit[finalIdentifierKeyName] = psmEditValue; // Place the edited value under the final key name
+          tempRowWithPsmEdit[finalIdentifierKeyName] = psmEditValue;
       }
 
 
@@ -498,20 +493,17 @@ export default function DataForgeStudio() {
         .filter(k => k.included)
         .sort((a, b) => a.order - b.order)
         .forEach(keyConf => {
-          const outputKeyName = keyConf.newName || keyConf.name;
+          const trimmedNewName = (typeof keyConf.newName === 'string') ? keyConf.newName.trim() : '';
+          const outputKeyName = (trimmedNewName !== '') ? trimmedNewName : keyConf.name;
           
-          // If the current keyConf.name is the original identifier key,
-          // and it has been potentially renamed and its value edited (handled above in tempRowWithPsmEdit)
           if (keyConf.name === originalIdentifierKey && tempRowWithPsmEdit.hasOwnProperty(outputKeyName)) {
             newObj[outputKeyName] = tempRowWithPsmEdit[outputKeyName];
           } 
-          // For all other keys (or if identifier key wasn't edited/renamed in a conflicting way)
           else if (originalRow.hasOwnProperty(keyConf.name)) {
              newObj[outputKeyName] = originalRow[keyConf.name];
           }
         });
       
-      // Strip out any remaining __internal__ keys from the final object that weren't handled by keyOrderConfig
       Object.keys(newObj).forEach(key => {
         if (key.startsWith('__')) {
           delete newObj[key];
@@ -544,12 +536,15 @@ export default function DataForgeStudio() {
          return;
     }
 
-    const headersForAI = activeKeyConfigs.map(k => k.newName || k.name);
+    const headersForAI = activeKeyConfigs.map(k => {
+        const trimmedNewName = (typeof k.newName === 'string') ? k.newName.trim() : '';
+        return (trimmedNewName !== '') ? trimmedNewName : k.name;
+    });
     
     const sampleCsvData = [
-      headersForAI.join(','), // Use new/renamed headers for the CSV header row sent to AI
+      headersForAI.join(','), 
       ...processedJson.slice(0, 5).map(row => 
-        activeKeyConfigs.map(kConf => JSON.stringify(row[kConf.name])).join(',') // Fetch data using original key name from processedJson
+        activeKeyConfigs.map(kConf => JSON.stringify(row[kConf.name])).join(',')
       ) 
     ].join('\n');
 
@@ -659,7 +654,8 @@ export default function DataForgeStudio() {
   
   const outputTableHeaders = useMemo(() => {
     if (!finalJsonOutputForPreview || finalJsonOutputForPreview.length === 0) return [];
-    return Object.keys(finalJsonOutputForPreview[0]);
+    // Ensure __id__ is not part of headers for display, but might be needed internally if we want to link back
+    return Object.keys(finalJsonOutputForPreview[0]).filter(h => h !== '__id__');
   }, [finalJsonOutputForPreview]);
 
   const handlePsmNumberChange = (rowId: string, newValue: string) => {
@@ -1099,12 +1095,21 @@ export default function DataForgeStudio() {
                       <Table>
                         <TableHeader className="sticky top-0 bg-background z-10">
                           <TableRow>
-                            <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><List className="h-4 w-4 inline-block mr-1" />#</TableHead>
+                            <TableHead className="px-2 py-1 text-xs whitespace-nowrap w-[50px]"><ListOrdered className="h-4 w-4 inline-block mr-1" />#</TableHead>
                             {outputTableHeaders.map(header => {
-                              const originalIdentifierKey = processedJson?.[0]?.__identifierKey__;
-                              const identifierKeyConfig = originalIdentifierKey ? keyOrderConfig.find(k => k.name === originalIdentifierKey) : null;
-                              const finalEditableHeaderName = identifierKeyConfig?.newName || originalIdentifierKey;
-                              const isEditableIdentifierHeader = finalEditableHeaderName && header === finalEditableHeaderName;
+                              // Determine if this header corresponds to the editable identifier
+                              // Find the original key name for the current header
+                              const keyConfForHeader = keyOrderConfig.find(kc => {
+                                const trimmedNewName = (typeof kc.newName === 'string') ? kc.newName.trim() : '';
+                                return (trimmedNewName !== '' ? trimmedNewName : kc.name) === header;
+                              });
+                              const originalHeaderName = keyConfForHeader ? keyConfForHeader.name : header;
+                              
+                              // Check if this original header name is the identifier key for the *first* processed row (as a sample)
+                              // This is a proxy for identifying the main ID column.
+                              const firstProcessedRow = processedJson && processedJson.length > 0 ? processedJson.find(pRow => !rowsDeselected.has(pRow.__id__)) : null;
+                              const identifierKeyForTable = firstProcessedRow?.__identifierKey__;
+                              const isEditableIdentifierHeader = identifierKeyForTable && originalHeaderName === identifierKeyForTable;
                               
                               return (
                                 <TableHead key={header} className="px-2 py-1 text-xs whitespace-nowrap">
@@ -1117,41 +1122,28 @@ export default function DataForgeStudio() {
                         </TableHeader>
                         <TableBody>
                           {finalJsonOutputForPreview.map((row, rowIndex) => {
-                            // Find the original processed row to get __id__ and __identifierKey__
-                            // This assumes finalJsonOutputForPreview maintains some link or can be mapped back.
-                            // If finalJsonOutputForPreview rows don't have __id__, this needs adjustment.
-                            // For now, we rely on getFinalJson creating objects that can be related back if needed,
-                            // or more directly, editablePsmNumbers is keyed by __id__ from the original processedJson.
-                            const originalProcessedItem = processedJson?.find(
-                                (pRow) => {
-                                    // This is a fallback logic. Ideally, `row` in finalJsonOutputForPreview should still have `__id__`
-                                    // or `getFinalJson` should pass it through if it's not stripped.
-                                    // For now, let's assume pRow.__rowIdentifier__ can be matched if psmNumber changes.
-                                    // Best if __id__ is present on `row` from `finalJsonOutputForPreview`.
-                                    // Let's assume `getFinalJson` doesn't strip `__id__` or `finalJsonOutputForPreview` is based on `processedJson`
-                                    // such that we can find the matching `__id__`.
-                                    // This might be brittle. A safer way is to ensure `__id__` is part of the `row` object here or map based on index.
-                                    // Let's use index for now, assuming `finalJsonOutputForPreview` order matches filtered `processedJson`.
-                                    const filteredProcessedJson = processedJson.filter(p => !rowsDeselected.has(p.__id__));
-                                    return filteredProcessedJson[rowIndex]?.__id__ === pRow.__id__;
-                                }
-                            );
-                            const rowId = originalProcessedItem?.__id__; // This is crucial for editing state
-                            const originalIdentifierKey = originalProcessedItem?.__identifierKey__;
-                            const identifierKeyConfig = originalIdentifierKey ? keyOrderConfig.find(k => k.name === originalIdentifierKey) : null;
-                            const finalEditableHeaderName = identifierKeyConfig?.newName || originalIdentifierKey;
+                            const filteredProcessedJson = processedJson ? processedJson.filter(p => !rowsDeselected.has(p.__id__)) : [];
+                            const originalProcessedItem = filteredProcessedJson[rowIndex];
+                            const rowId = originalProcessedItem?.__id__; 
+
+                            // Determine which header is the editable one for *this specific row*
+                            // This uses the __identifierKey__ stored on the processed row itself
+                            const originalIdentifierKeyForRow = originalProcessedItem?.__identifierKey__;
+                            const identifierKeyConfigForRow = originalIdentifierKeyForRow ? keyOrderConfig.find(k => k.name === originalIdentifierKeyForRow) : null;
+                            const trimmedNewNameForRowIdentifier = identifierKeyConfigForRow && typeof identifierKeyConfigForRow.newName === 'string' ? identifierKeyConfigForRow.newName.trim() : '';
+                            const finalEditableHeaderNameForRow = (trimmedNewNameForRowIdentifier !== '') ? trimmedNewNameForRowIdentifier : originalIdentifierKeyForRow;
 
                             return (
                               <TableRow key={`output-row-${rowId || rowIndex}`}>
                                 <TableCell className="text-xs px-2 py-1 font-medium text-muted-foreground">{rowIndex + 1}</TableCell>
                                 {outputTableHeaders.map(header => {
-                                  const isEditableField = rowId && finalEditableHeaderName && header === finalEditableHeaderName;
+                                  const isEditableField = rowId && finalEditableHeaderNameForRow && header === finalEditableHeaderNameForRow;
                                   return (
                                     <TableCell key={`output-cell-${rowId || rowIndex}-${header}`} className="text-xs px-2 py-1 max-w-[200px] truncate" title={String(row[header])}>
                                       {isEditableField && rowId ? (
                                         <Input
                                           type="text"
-                                          value={editablePsmNumbers[rowId] ?? String(row[header])} // Use stored edit or current value
+                                          value={editablePsmNumbers[rowId] ?? String(row[header])} 
                                           onChange={(e) => handlePsmNumberChange(rowId, e.target.value)}
                                           className="h-7 text-xs p-1"
                                         />
